@@ -1,0 +1,284 @@
+================================================================================
+ANALYTICS AGENT - END-TO-END STREAMING TEST SUITE
+Quick Start Guide
+================================================================================
+
+FILES CREATED:
+  /tests/conftest.py                 - Shared pytest fixtures
+  /tests/test_e2e_streaming.py       - Full test suite (12 tests)
+  /tests/E2E_STREAMING_TESTS.md      - Detailed documentation
+  /tests/TESTING_QUICKSTART.txt      - This file
+
+================================================================================
+WHAT IS TESTED
+================================================================================
+
+The test suite verifies the complete analytics agent pipeline:
+
+1. DATA QUERY PATH (TestDataQueryE2E)
+   User message → Intent classification → MCP tool calls → Synthesis → Response
+
+   Tests:
+   - test_full_data_query_pipeline       : Single tool execution
+   - test_multi_tool_query_plan          : Multiple parallel tools
+
+2. FOLLOW-UP PATH (TestFollowUpE2E)
+   User message → Intent classification → Synthesis (no tools) → Response
+
+   Tests:
+   - test_follow_up_skips_mcp_tools      : Direct synthesis from cache
+
+3. CLARIFICATION PATH (TestClarificationE2E)
+   User message → Intent classification → Error handler → Response
+
+   Tests:
+   - test_clarification_returns_help_message : Helpful guidance
+
+4. ERROR HANDLING (TestErrorHandlingE2E)
+   Tool failures and LLM errors handled gracefully
+
+   Tests:
+   - test_mcp_tool_failure_streams_error_and_continues
+   - test_llm_failure_graceful_degradation
+
+5. DATA STREAM PROTOCOL (TestDataStreamProtocol)
+   Vercel AI SDK Data Stream Protocol format compliance
+
+   Tests:
+   - test_response_content_type
+   - test_finish_message_always_sent
+   - test_reasoning_before_narrative
+   - test_json_parsing_correctness
+   - test_empty_message_array_handling
+   - test_streaming_response_newline_delimited
+
+================================================================================
+RUNNING THE TESTS
+================================================================================
+
+PREREQUISITE SETUP:
+  pip install pytest pytest-asyncio httpx
+
+RUN ALL TESTS:
+  pytest tests/test_e2e_streaming.py -v
+
+RUN SPECIFIC CLASS:
+  pytest tests/test_e2e_streaming.py::TestDataQueryE2E -v
+  pytest tests/test_e2e_streaming.py::TestDataStreamProtocol -v
+
+RUN SINGLE TEST:
+  pytest tests/test_e2e_streaming.py::TestDataQueryE2E::test_full_data_query_pipeline -v
+
+RUN WITH COVERAGE:
+  pytest tests/test_e2e_streaming.py --cov=src --cov-report=html
+
+RUN IN PARALLEL:
+  pytest tests/test_e2e_streaming.py -n auto
+
+RUN WITH SHORT OUTPUT:
+  pytest tests/test_e2e_streaming.py --tb=short -q
+
+================================================================================
+FIXTURES PROVIDED (conftest.py)
+================================================================================
+
+MOCK BRIDGES:
+  mock_bridges
+  ├── data-mcp           : Database queries (execute_read_query)
+  ├── salesforce-mcp     : CRM data (get_salesforce_summary, get_account_details)
+  ├── payments-mcp       : Payments (get_payment_summary, get_settlement_status)
+  └── news-search-mcp    : News (search_company_news)
+
+MOCK CONFIG:
+  mock_config           : AgentConfig with routing models and timeouts
+
+LLM FACTORIES:
+  mock_router_llm_factory       : Creates router LLM mocks
+  mock_synthesis_llm_factory    : Creates synthesis LLM mocks
+
+CONVENIENCE FIXTURES:
+  mock_router_llm       : Pre-configured router LLM
+  mock_synthesis_llm    : Pre-configured synthesis LLM
+
+================================================================================
+KEY UTILITIES
+================================================================================
+
+DataStreamParser:
+  Parses the Vercel AI SDK Data Stream Protocol format
+
+  Usage:
+    parser = DataStreamParser()
+    parser.parse_response(response_text)
+
+    reasoning = parser.get_reasoning_tokens()      # g: prefix
+    narrative = parser.get_text_tokens()           # 0: prefix
+    tool_calls = parser.get_tool_calls()           # b: prefix
+    tool_results = parser.get_tool_results()       # a: prefix
+    components = parser.get_ui_components()        # 2: prefix
+    errors = parser.get_errors()                   # 3: prefix
+    finish = parser.get_finish_events()            # d: prefix
+
+================================================================================
+DATA STREAM PROTOCOL FORMAT
+================================================================================
+
+Response is newline-delimited JSON with prefixes:
+
+  0:"token"             - Narrative text token
+  g:"token"             - Reasoning/thinking token
+  b:{...}               - Tool call begin
+  a:{...}               - Tool call result
+  2:[{...}]             - UI components
+  3:"error"             - Error message
+  d:{...}               - Finish (stop|error|length)
+
+Example response:
+  g:"Classifying intent..."
+  g:"Intent: data_query"
+  b:{"toolCallId":"tc_1","toolName":"execute_read_query"}
+  a:{"toolCallId":"tc_1","result":"..."}
+  2:[{"component_type":"BarChart",...}]
+  0:"Revenue shows strong growth."
+  d:{"finishReason":"stop"}
+
+================================================================================
+WRITING CUSTOM TESTS
+================================================================================
+
+Pattern 1: Data Query Test
+
+  async def test_example(self, app_with_mocks):
+      app, router_structured, synthesis_structured = app_with_mocks
+
+      router_structured.ainvoke = AsyncMock(return_value=IntentResult(
+          intent="data_query",
+          query_plan=[QueryPlanStep(...)],
+          reasoning="...",
+      ))
+
+      synthesis_structured.ainvoke = AsyncMock(return_value=AnalyticsResponse(
+          narrative="...",
+          components=[...],
+      ))
+
+      async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app)) as client:
+          response = await client.post("/api/v1/analytics/chat", json={...})
+
+      parser = DataStreamParser()
+      parser.parse_response(response.text)
+      assert len(parser.get_text_tokens()) > 0
+
+Pattern 2: Error Handling Test
+
+  async def test_error_example(self, app_with_mocks, mock_bridges):
+      app, router_structured, synthesis_structured = app_with_mocks
+
+      # Make a tool fail
+      mock_bridges["data-mcp"].invoke = AsyncMock(
+          side_effect=Exception("Tool failed")
+      )
+
+      # Response should still complete
+      async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app)) as client:
+          response = await client.post("/api/v1/analytics/chat", json={...})
+
+      parser = DataStreamParser()
+      parser.parse_response(response.text)
+      assert len(parser.get_finish_events()) > 0
+
+================================================================================
+TROUBLESHOOTING
+================================================================================
+
+IMPORT ERRORS:
+  ✗ ModuleNotFoundError: pytest
+  → Install: pip install pytest pytest-asyncio httpx
+
+ASYNCIO ERRORS:
+  ✗ RuntimeError: Event loop already running
+  → Use @pytest.mark.asyncio decorator on async tests
+
+TIMEOUT ERRORS:
+  ✗ Timeout waiting for response
+  → Check that AsyncMock methods are properly configured
+  → Verify mock_bridges are set to is_connected=True
+
+PARSING ERRORS:
+  ✗ Failed to parse response
+  → Use DataStreamParser.parse_response() and check for parse_errors
+  → Verify response is newline-delimited
+
+CONNECTION ERRORS:
+  ✗ Can't connect to app
+  → Verify httpx.ASGITransport is used with FastAPI app
+  → Check app.state.graph is set in fixture
+
+================================================================================
+TEST STATISTICS
+================================================================================
+
+Total Test Classes:     5
+Total Test Methods:     12
+Total Code Lines:       1,349 (809 test code + 225 fixtures + 315 docs)
+Test Coverage Goals:    Happy path + Error paths + Protocol compliance
+
+Expected Test Run Time: ~5-10 seconds (with mocked external services)
+Memory Usage:           ~100-200 MB (typical for pytest session)
+
+================================================================================
+INTEGRATION WITH CI/CD
+================================================================================
+
+GitHub Actions Example:
+
+  - name: Run E2E Streaming Tests
+    run: |
+      pip install pytest pytest-asyncio httpx
+      pytest tests/test_e2e_streaming.py -v \
+        --tb=short \
+        --junitxml=test-results.xml
+
+GitLab CI Example:
+
+  test:e2e:streaming:
+    stage: test
+    script:
+      - pip install pytest pytest-asyncio httpx
+      - pytest tests/test_e2e_streaming.py -v
+    artifacts:
+      reports:
+        junit: test-results.xml
+
+================================================================================
+NEXT STEPS
+================================================================================
+
+1. Run the full test suite:
+   pytest tests/test_e2e_streaming.py -v
+
+2. Examine specific test:
+   pytest tests/test_e2e_streaming.py::TestDataQueryE2E::test_full_data_query_pipeline -vv
+
+3. Review E2E_STREAMING_TESTS.md for detailed documentation
+
+4. Add to CI/CD pipeline with the examples above
+
+5. Extend tests for your specific scenarios:
+   - Custom intent types
+   - Additional MCP servers
+   - Different UI components
+   - Load testing scenarios
+
+================================================================================
+RESOURCES
+================================================================================
+
+- E2E_STREAMING_TESTS.md  : Comprehensive documentation
+- conftest.py            : Fixture definitions
+- test_e2e_streaming.py  : Test implementations
+
+For questions about fixtures or test patterns, see conftest.py comments.
+For Data Stream Protocol details, see app.py POST /api/v1/analytics/chat.
+
+================================================================================
