@@ -58,7 +58,7 @@ def make_mcp_tool_caller_node(bridges: dict):
                     WHERE "Name" ILIKE $1
                     UNION
                     SELECT "PartyName" AS name
-                    FROM payments.dim_party
+                    FROM bankdw.dim_party
                     WHERE "PartyName" ILIKE $1
                 ) matches
                 ORDER BY name
@@ -176,7 +176,10 @@ def make_mcp_tool_caller_node(bridges: dict):
                     tool_info["status"] = "error"
                     return {result_key: {"error": error_msg}}
 
-                # Inject session_id if the tool requires it
+                # Inject session_id if the tool accepts it.
+                # Server-side injected — the LLM cannot override it.
+                # User auth context (auth_context) is injected automatically
+                # by the MCPToolBridge via ContextVar — not as a schema parameter.
                 if tool_fn.args_schema:
                     tool_schema = tool_fn.args_schema.model_json_schema()
                     if "session_id" in tool_schema.get("properties", {}):

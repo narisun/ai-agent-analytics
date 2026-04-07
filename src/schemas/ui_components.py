@@ -42,7 +42,7 @@ class ChartMetadata(BaseModel):
     )
     format_hint: Optional[str] = Field(
         default=None,
-        description="Value formatting: 'currency' | 'percent' | 'number' | 'compact'",
+        description="Value formatting: 'currency' | 'percent' | 'number' | 'compact' | 'date' | 'datetime'",
     )
 
 

@@ -20,6 +20,12 @@ from ..state import AnalyticsState
 
 log = get_logger(__name__)
 
+# Maximum data points per chart component to prevent LLM JSON generation issues.
+# Large arrays (40+ items) often cause malformed structured output.
+MAX_CHART_DATA_POINTS = 20
+
+# Number of retries when structured output fails (JSON parse errors)
+SYNTHESIS_MAX_RETRIES = 2
 
 _SYNTHESIS_SYSTEM_PROMPT = """You are a data analyst for an enterprise analytics platform.
 
@@ -50,7 +56,11 @@ Choose the most appropriate visualization for each data insight:
    - "percent" for percentages
    - "number" for plain numbers
    - "compact" for abbreviated large numbers (1.2M, 500K)
+   - "date" for date columns — the frontend will auto-detect and format date values
+   - "datetime" for datetime columns
 7. Ensure data values are RAW NUMBERS (not formatted strings like "$1.2M").
+   For DATE columns, keep the original value (integer like 20250803 or string like "2025-08-03") —
+   the frontend will detect and format it correctly.
 8. The narrative should reference specific numbers and trends from the data.
 9. If data contains errors, acknowledge them in the narrative and reduce confidence_score.
 10. If the raw data contains a "_client_suggestions" key, the requested client was not found.
@@ -59,7 +69,10 @@ Choose the most appropriate visualization for each data insight:
     - If suggestions are provided, list them and ask "Did you mean one of these?"
     - Do NOT generate any charts or KPIs — return an empty components list
     - Keep the tone helpful and encourage the user to try an exact name
-"""
+11. IMPORTANT: Limit chart data arrays to at most {max_data_points} items.
+    If there are more items, include only the top {max_data_points} by value
+    and mention in the narrative that you are showing the top {max_data_points}.
+""".format(max_data_points=MAX_CHART_DATA_POINTS)
 
 
 def make_synthesis_node(synthesis_llm, prompts=None, compaction_modifier: Optional[Callable] = None):
@@ -105,29 +118,62 @@ def make_synthesis_node(synthesis_llm, prompts=None, compaction_modifier: Option
             f"{error_context}"
         )
 
-        try:
-            result = await structured_llm.ainvoke([HumanMessage(content=prompt_content)])
-            log.info(
-                "synthesis_complete",
-                components=len(result.components),
-                narrative_length=len(result.narrative),
-            )
-            return {
-                "narrative": result.narrative,
-                "ui_components": [c.model_dump() for c in result.components],
-                "messages": [AIMessage(content=result.narrative)],
-            }
-        except Exception as exc:
-            log.error("synthesis_error", error=str(exc))
-            fallback_narrative = (
-                f"I retrieved data from {len(raw_data)} sources but encountered an error "
-                f"generating the analysis: {exc}. The raw data is available for inspection."
-            )
-            return {
-                "narrative": fallback_narrative,
-                "ui_components": [],
-                "messages": [AIMessage(content=fallback_narrative)],
-                "errors": [f"synthesis: {exc}"],
-            }
+        last_error: Optional[Exception] = None
+        for attempt in range(1 + SYNTHESIS_MAX_RETRIES):
+            try:
+                result = await structured_llm.ainvoke([HumanMessage(content=prompt_content)])
+
+                # Post-process: enforce MAX_CHART_DATA_POINTS on each component
+                for comp in result.components:
+                    if (
+                        comp.component_type in ("BarChart", "LineChart", "AreaChart")
+                        and len(comp.data) > MAX_CHART_DATA_POINTS
+                    ):
+                        # Sort descending by "value" and keep top N
+                        try:
+                            sorted_data = sorted(
+                                comp.data,
+                                key=lambda d: d.get("value", 0) if isinstance(d, dict) else 0,
+                                reverse=True,
+                            )
+                            comp.data = sorted_data[:MAX_CHART_DATA_POINTS]
+                        except (TypeError, AttributeError):
+                            comp.data = comp.data[:MAX_CHART_DATA_POINTS]
+
+                log.info(
+                    "synthesis_complete",
+                    components=len(result.components),
+                    narrative_length=len(result.narrative),
+                    attempt=attempt + 1,
+                )
+                return {
+                    "narrative": result.narrative,
+                    "ui_components": [c.model_dump() for c in result.components],
+                    "messages": [AIMessage(content=result.narrative)],
+                }
+            except Exception as exc:
+                last_error = exc
+                if attempt < SYNTHESIS_MAX_RETRIES:
+                    log.warning(
+                        "synthesis_retry",
+                        error=str(exc),
+                        attempt=attempt + 1,
+                        max_retries=SYNTHESIS_MAX_RETRIES,
+                    )
+                    continue
+
+        # All retries exhausted
+        log.error("synthesis_error", error=str(last_error))
+        fallback_narrative = (
+            f"I retrieved data from {len(raw_data)} sources but encountered an error "
+            f"generating the analysis. Please try rephrasing your question or asking "
+            f"for a more specific subset of data."
+        )
+        return {
+            "narrative": fallback_narrative,
+            "ui_components": [],
+            "messages": [AIMessage(content=fallback_narrative)],
+            "errors": [f"synthesis: {last_error}"],
+        }
 
     return synthesis_node

@@ -28,8 +28,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
-from platform_sdk import AgentConfig, AgentContext, configure_logging, get_logger
-from platform_sdk.mcp_bridge import MCPToolBridge
+from platform_sdk import AgentConfig, AgentContext, configure_logging, get_logger, setup_telemetry, flush_langfuse
+from platform_sdk.mcp_bridge import MCPToolBridge, set_user_auth_token, reset_user_auth_token
 from platform_sdk.security import make_api_key_verifier
 from .graph import build_analytics_graph
 from .middleware.rate_limiter import make_rate_limiter
@@ -85,6 +85,7 @@ class UpdateConversationRequest(BaseModel):
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Initialize MCP bridges and build the analytics graph on startup."""
+    setup_telemetry("analytics-agent")
     config = AgentConfig.from_env()
 
     # MCP server URLs from environment
@@ -95,15 +96,16 @@ async def lifespan(app: FastAPI):
         "news-search-mcp": os.getenv("NEWS_MCP_URL", "http://news-search-mcp:8000/sse"),
     }
 
-    # Build agent context for MCP authorization
-    env = os.getenv("ENVIRONMENT", "local")
+    # Build service-level agent context for MCP SSE connections.
+    # This identifies the AGENT SERVICE (not the user).  User identity is
+    # carried per-request via the HMAC-signed auth_context token.
     agent_context = AgentContext(
         rm_id="analytics-agent",
         rm_name="Analytics Agent",
-        role="manager" if env in ("local", "dev") else "analyst",
+        role="manager",
         team_id="analytics",
         assigned_account_ids=(),
-        compliance_clearance=("standard", "aml_view") if env in ("local", "dev") else ("standard",),
+        compliance_clearance=("standard", "aml_view"),
     )
 
     # Connect to all MCP servers in parallel
@@ -136,6 +138,9 @@ async def lifespan(app: FastAPI):
     log.info("analytics_agent_ready")
 
     yield
+
+    # Shutdown: flush LangFuse traces before disconnecting
+    flush_langfuse()
 
     # Shutdown: disconnect conversation store if needed
     if hasattr(store, "disconnect"):
@@ -222,7 +227,9 @@ async def stream_analytics(
                     "messages": [{"role": "user", "content": request.message}],
                     "session_id": request.session_id,
                 },
-                config={"configurable": {"thread_id": request.session_id}},
+                config={
+                    "configurable": {"thread_id": request.session_id},
+                },
                 version="v2",
             ):
                 event_type = event.get("event", "")
@@ -343,6 +350,7 @@ def _ds_finish(reason: str = "stop") -> str:
 
 @app.post("/api/v1/analytics/chat")
 async def chat_analytics(
+    raw_request: Request,
     request: VercelChatRequest,
     _token: str = Depends(verify_api_key),
     _rate: None = Depends(check_rate_limit),
@@ -355,12 +363,39 @@ async def chat_analytics(
     Consumes the same LangGraph astream_events(v2) and maps them to the
     line-based Data Stream Protocol format.
 
+    Auth flow:
+      Dashboard extracts Auth0 session → X-User-Email + X-User-Role headers.
+      These are forwarded into the graph state and injected into MCP tool
+      calls so OPA can evaluate per-user authorization.
+
     Conversation history: The Vercel AI SDK sends the full messages array on
     every request. We pass recent history to the graph so the intent router
     can distinguish follow-ups from new queries. The checkpointer handles
     long-term state persistence.
     """
     graph = app.state.graph
+
+    # Extract authenticated user identity from headers (set by dashboard API route).
+    # The dashboard authenticates via Auth0; these headers are trusted because this
+    # endpoint requires INTERNAL_API_KEY (service-to-service auth).
+    user_email = raw_request.headers.get("x-user-email", "anonymous")
+    user_role = raw_request.headers.get("x-user-role", "")
+    log.info("chat_user_context", user_email=user_email, user_role=user_role)
+
+    # Build per-request AgentContext carrying user identity and HMAC-sign it.
+    # This signed token flows to every MCP tool call via the bridge ContextVar,
+    # ensuring user_role cannot be forged by the LLM or any intermediate caller.
+    per_request_ctx = AgentContext(
+        rm_id=user_email,
+        rm_name=user_email.split("@")[0] if "@" in user_email else user_email,
+        role="manager",
+        team_id="analytics",
+        assigned_account_ids=(),
+        compliance_clearance=("standard", "aml_view"),
+        user_email=user_email,
+        user_role=user_role,
+    )
+    auth_ctx_token = set_user_auth_token(per_request_ctx.to_header_value())
 
     # Extract latest user message
     user_message = ""
@@ -412,7 +447,9 @@ async def chat_analytics(
                     "messages": graph_messages,
                     "session_id": session_id,
                 },
-                config={"configurable": {"thread_id": session_id}},
+                config={
+                    "configurable": {"thread_id": session_id},
+                },
                 version="v2",
             ):
                 event_type = event.get("event", "")
@@ -448,12 +485,30 @@ async def chat_analytics(
                             active_tool_calls[tool_name] = tc_id
                             yield _ds_tool_call_begin(tc_id, f"{server}/{tool_name}")
 
+                            # Emit SQL queries so the frontend can display them
+                            if tool_name == "execute_read_query":
+                                sql = step.get("parameters", {}).get("query", "")
+                                if sql:
+                                    yield _ds_reasoning(f"__SQL_QUERY__:{sql}:__END_SQL__\n")
+
                     elif event_name == "mcp_tool_caller":
                         tools = output.get("active_tools", [])
                         for tool_info in tools:
                             tool_name = tool_info.get("tool", "") if isinstance(tool_info, dict) else str(tool_info)
                             tc_id = active_tool_calls.get(tool_name, f"tc_{uuid.uuid4().hex[:8]}")
                             yield _ds_tool_result(tc_id, json.dumps({"status": "complete", "tool": tool_name}, default=str))
+
+                        # Extract _sql_queries from MCP tool results for UI display
+                        raw_data = output.get("raw_data_context", {})
+                        for _rk, rv in raw_data.items():
+                            try:
+                                parsed = json.loads(rv) if isinstance(rv, str) else rv
+                                if isinstance(parsed, dict) and "_sql_queries" in parsed:
+                                    for sq in parsed["_sql_queries"]:
+                                        yield _ds_reasoning(f"__SQL_QUERY__:{sq}:__END_SQL__\n")
+                            except (json.JSONDecodeError, TypeError):
+                                pass
+
                         # Stream any MCP errors as visible text
                         mcp_errors = output.get("errors", [])
                         if mcp_errors:
@@ -546,8 +601,16 @@ async def chat_analytics(
                 conversation_id=session_id,
             )
 
+    async def stream_with_auth_cleanup():
+        """Wrap the stream to ensure the auth ContextVar is reset after completion."""
+        try:
+            async for chunk in stream_with_persistence():
+                yield chunk
+        finally:
+            reset_user_auth_token(auth_ctx_token)
+
     return StreamingResponse(
-        stream_with_persistence(),
+        stream_with_auth_cleanup(),
         media_type="text/plain; charset=utf-8",
         headers={
             "Cache-Control": "no-cache",
