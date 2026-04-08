@@ -30,6 +30,11 @@ def make_error_handler_node():
                 "For example: *\"Show me Q3 revenue by region\"* or "
                 "*\"What's the payment trend for Acme Corp?\"*"
             )
+            follow_ups = [
+                "Show payment trends for a specific company over the last 90 days",
+                "Which banks processed the highest inbound payment volume last quarter?",
+                "Show the current Salesforce pipeline broken down by stage and value",
+            ]
             log.info("clarification_sent", reasoning=reasoning)
         else:
             error_detail = "; ".join(errors) if errors else "Unknown error"
@@ -37,11 +42,17 @@ def make_error_handler_node():
                 f"I encountered an issue processing your request: {error_detail}. "
                 "Could you try rephrasing your question?"
             )
+            follow_ups = [
+                "Show total completed payments by transaction type",
+                "List the top 10 CRM accounts ranked by annual revenue",
+                "Which banks processed the highest payment volume last quarter?",
+            ]
             log.warning("error_handler_invoked", errors=errors)
 
         return {
             "narrative": message,
             "ui_components": [],
+            "follow_up_suggestions": follow_ups,
             "messages": [AIMessage(content=message)],
         }
 

@@ -94,8 +94,9 @@ class UIComponent(BaseModel):
 class AnalyticsResponse(BaseModel):
     """Complete response from the synthesis node.
 
-    Contains a narrative summary (streamed as text events) and zero or more
-    UI components (each emitted as a ui_component event).
+    Contains a narrative summary (streamed as text events), zero or more
+    UI components (each emitted as a ui_component event), and up to 3
+    follow-up suggestions to guide the user's next query.
     """
     narrative: str = Field(
         min_length=1,
@@ -104,4 +105,13 @@ class AnalyticsResponse(BaseModel):
     components: list[UIComponent] = Field(
         default_factory=list,
         description="UI components to render in the frontend canvas area",
+    )
+    follow_up_suggestions: list[str] = Field(
+        default_factory=list,
+        max_length=3,
+        description=(
+            "Up to 3 complete, submittable follow-up queries the user might ask next, "
+            "grounded in the data that was just shown. Each must be a full sentence "
+            "the user can send as-is (no placeholder tokens). Maximum 3 items."
+        ),
     )

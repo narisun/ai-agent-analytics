@@ -28,7 +28,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
-from platform_sdk import AgentConfig, AgentContext, configure_logging, get_logger, setup_telemetry, flush_langfuse
+from platform_sdk import AgentConfig, AgentContext, configure_logging, get_logger, setup_checkpointer, setup_telemetry, flush_langfuse
 from platform_sdk.mcp_bridge import MCPToolBridge, set_user_auth_token, reset_user_auth_token
 from platform_sdk.security import make_api_key_verifier
 from .graph import build_analytics_graph
@@ -123,8 +123,13 @@ async def lifespan(app: FastAPI):
     for name, bridge in bridges.items():
         log.info("mcp_startup_status", server=name, connected=bridge.is_connected)
 
+    # Initialise the checkpointer (creates Postgres tables if needed) before
+    # compiling the graph.  Using setup_checkpointer() ensures checkpoint tables
+    # exist before the first multi-turn request.
+    checkpointer = await setup_checkpointer(config)
+
     # Build the compiled graph
-    graph = build_analytics_graph(bridges=bridges, config=config)
+    graph = build_analytics_graph(bridges=bridges, config=config, checkpointer=checkpointer)
 
     # Initialize conversation store (PostgreSQL or in-memory)
     store = _make_conversation_store()
@@ -521,6 +526,14 @@ async def chat_analytics(
                         if components:
                             yield _ds_data(components)
                             captured_components.extend(components)
+                        # Emit follow-up suggestions as a typed data event so the
+                        # frontend can render them below the assistant message.
+                        follow_ups = output.get("follow_up_suggestions", [])
+                        if follow_ups:
+                            yield _ds_data([{
+                                "type": "follow_up_suggestions",
+                                "suggestions": follow_ups,
+                            }])
                         # Emit narrative as text if not already streamed via on_chat_model_stream
                         narrative = output.get("narrative", "")
                         if narrative and not synthesis_streamed:
@@ -538,6 +551,13 @@ async def chat_analytics(
                             error_msg = f"I encountered an issue: {'; '.join(str(e) for e in errors)}"
                             yield _ds_text(error_msg)
                             captured_narrative = error_msg
+                        # Emit follow-up suggestions so the user has guided recovery options
+                        follow_ups = output.get("follow_up_suggestions", [])
+                        if follow_ups:
+                            yield _ds_data([{
+                                "type": "follow_up_suggestions",
+                                "suggestions": follow_ups,
+                            }])
 
                     current_node = None
 

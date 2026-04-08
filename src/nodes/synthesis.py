@@ -20,14 +20,17 @@ from ..state import AnalyticsState
 
 log = get_logger(__name__)
 
-# Maximum data points per chart component to prevent LLM JSON generation issues.
-# Large arrays (40+ items) often cause malformed structured output.
+# Default maximum data points per chart component.
+# Overridden at runtime via AgentConfig.chart_max_data_points / CHART_MAX_DATA_POINTS env var.
+# Large arrays (40+ items) often cause malformed structured output from the LLM.
 MAX_CHART_DATA_POINTS = 20
 
 # Number of retries when structured output fails (JSON parse errors)
 SYNTHESIS_MAX_RETRIES = 2
 
-_SYNTHESIS_SYSTEM_PROMPT = """You are a data analyst for an enterprise analytics platform.
+# Template — {max_data_points} is resolved inside make_synthesis_node() using
+# the runtime config value so operators can tune it without code changes.
+_SYNTHESIS_SYSTEM_PROMPT_TEMPLATE = """You are a data analyst for an enterprise analytics platform.
 
 Your job is to analyze raw data from enterprise systems and produce:
 1. A clear, concise narrative (2-3 sentences) summarizing the key insights
@@ -72,18 +75,49 @@ Choose the most appropriate visualization for each data insight:
 11. IMPORTANT: Limit chart data arrays to at most {max_data_points} items.
     If there are more items, include only the top {max_data_points} by value
     and mention in the narrative that you are showing the top {max_data_points}.
-""".format(max_data_points=MAX_CHART_DATA_POINTS)
+
+## Follow-Up Suggestions
+
+After generating the narrative and components, produce exactly 3 items in follow_up_suggestions.
+
+Rules:
+- Each suggestion must be a complete, self-contained sentence the user can submit as-is.
+- Do NOT use placeholder tokens like [company name] — use actual entity names from the data
+  you retrieved (e.g. "Microsoft Corp.", "Goldman Sachs", "Acme Corp").
+- Each suggestion should approach the topic from a DIFFERENT angle:
+    • One drill-down: more granular detail on a specific entity or time window
+    • One comparison: benchmark the entity/metric against another entity or time period
+    • One cross-domain: pivot to a different data source (CRM if you queried payments,
+      payments if you queried CRM, news if you queried either)
+- Keep each suggestion under 18 words.
+- If no useful data was retrieved (error case), return 3 generic but helpful suggestions
+  that guide the user toward a successful query.
+"""
 
 
-def make_synthesis_node(synthesis_llm, prompts=None, compaction_modifier: Optional[Callable] = None):
+def make_synthesis_node(
+    synthesis_llm,
+    prompts=None,
+    compaction_modifier: Optional[Callable] = None,
+    chart_max_data_points: int = MAX_CHART_DATA_POINTS,
+):
     """Build the synthesis node.
 
     Args:
-        synthesis_llm: LangChain ChatModel configured with complex-routing.
-        prompts: Optional PromptLoader for template overrides.
-        compaction_modifier: Optional callable to trim messages before LLM call.
+        synthesis_llm:         LangChain ChatModel configured with complex-routing.
+        prompts:               Optional PromptLoader for template overrides.
+        compaction_modifier:   Optional callable to trim messages before LLM call.
+        chart_max_data_points: Maximum data points per chart component.  Passed via
+                               AgentConfig.chart_max_data_points so operators can tune
+                               it without a code change.  Defaults to MAX_CHART_DATA_POINTS (20).
     """
+    # Resolve system prompt with the runtime limit so the LLM knows the cap
+    _system_prompt = _SYNTHESIS_SYSTEM_PROMPT_TEMPLATE.format(
+        max_data_points=chart_max_data_points
+    )
     structured_llm = synthesis_llm.with_structured_output(AnalyticsResponse)
+
+    log.info("synthesis_node_built", chart_max_data_points=chart_max_data_points)
 
     async def synthesis_node(state: AnalyticsState) -> dict:
         raw_data = state.get("raw_data_context", {})
@@ -112,7 +146,7 @@ def make_synthesis_node(synthesis_llm, prompts=None, compaction_modifier: Option
             )
 
         prompt_content = (
-            f"{_SYNTHESIS_SYSTEM_PROMPT}\n\n"
+            f"{_system_prompt}\n\n"
             f"## User Query\n{last_query}\n\n"
             f"## Raw Data from MCP Servers\n```json\n{data_summary}\n```"
             f"{error_context}"
@@ -123,12 +157,20 @@ def make_synthesis_node(synthesis_llm, prompts=None, compaction_modifier: Option
             try:
                 result = await structured_llm.ainvoke([HumanMessage(content=prompt_content)])
 
-                # Post-process: enforce MAX_CHART_DATA_POINTS on each component
+                # Post-process: enforce chart_max_data_points on each component.
+                # This is a safety net — the LLM should respect the limit in the prompt,
+                # but structured output parsing can return more items than instructed.
                 for comp in result.components:
                     if (
                         comp.component_type in ("BarChart", "LineChart", "AreaChart")
-                        and len(comp.data) > MAX_CHART_DATA_POINTS
+                        and len(comp.data) > chart_max_data_points
                     ):
+                        log.warning(
+                            "chart_data_truncated",
+                            component_type=comp.component_type,
+                            original_count=len(comp.data),
+                            truncated_to=chart_max_data_points,
+                        )
                         # Sort descending by "value" and keep top N
                         try:
                             sorted_data = sorted(
@@ -136,19 +178,21 @@ def make_synthesis_node(synthesis_llm, prompts=None, compaction_modifier: Option
                                 key=lambda d: d.get("value", 0) if isinstance(d, dict) else 0,
                                 reverse=True,
                             )
-                            comp.data = sorted_data[:MAX_CHART_DATA_POINTS]
+                            comp.data = sorted_data[:chart_max_data_points]
                         except (TypeError, AttributeError):
-                            comp.data = comp.data[:MAX_CHART_DATA_POINTS]
+                            comp.data = comp.data[:chart_max_data_points]
 
                 log.info(
                     "synthesis_complete",
                     components=len(result.components),
+                    follow_ups=len(result.follow_up_suggestions),
                     narrative_length=len(result.narrative),
                     attempt=attempt + 1,
                 )
                 return {
                     "narrative": result.narrative,
                     "ui_components": [c.model_dump() for c in result.components],
+                    "follow_up_suggestions": result.follow_up_suggestions,
                     "messages": [AIMessage(content=result.narrative)],
                 }
             except Exception as exc:
@@ -172,6 +216,11 @@ def make_synthesis_node(synthesis_llm, prompts=None, compaction_modifier: Option
         return {
             "narrative": fallback_narrative,
             "ui_components": [],
+            "follow_up_suggestions": [
+                "Show total completed payments by transaction type",
+                "List the top 10 CRM accounts ranked by annual revenue",
+                "Which banks processed the highest payment volume last quarter?",
+            ],
             "messages": [AIMessage(content=fallback_narrative)],
             "errors": [f"synthesis: {last_error}"],
         }
