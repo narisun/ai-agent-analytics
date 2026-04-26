@@ -207,6 +207,7 @@ async def health_ready():
 
 @app.post("/api/v1/analytics/stream")
 async def stream_analytics(
+    raw_request: Request,
     request: ChatRequest,
     _token: str = Depends(verify_api_key),
     _rate: None = Depends(check_rate_limit),
@@ -226,6 +227,10 @@ async def stream_analytics(
     """
     graph = app.state.graph
 
+    # Extract authenticated user identity from headers (set by dashboard API
+    # route, trusted because this endpoint requires INTERNAL_API_KEY).
+    user_email = raw_request.headers.get("x-user-email", "anonymous")
+
     async def event_generator():
         try:
             async for event in graph.astream_events(
@@ -234,7 +239,9 @@ async def stream_analytics(
                     "session_id": request.session_id,
                 },
                 config={
-                    "configurable": {"thread_id": request.session_id},
+                    "configurable": {
+                        "thread_id": make_thread_id(user_email, request.session_id),
+                    },
                 },
                 version="v2",
             ):

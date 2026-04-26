@@ -114,3 +114,58 @@ class TestChatEndpointThreadIdIsolation:
         )
         assert "alice@example.com" in thread_ids[0]
         assert "bob@example.com" in thread_ids[1]
+
+
+class TestStreamEndpointThreadIdIsolation:
+    """Cross-user isolation contract for POST /api/v1/analytics/stream.
+
+    The legacy SSE endpoint must mirror /chat's tenant-scoping. Today
+    /stream does not even read X-User-Email — these tests assert that
+    after Task 3 it does, and that thread_id is namespaced the same way.
+    """
+
+    def test_thread_id_includes_user_email(self, client, captured_configs):
+        payload = {
+            "session_id": "shared-session-uuid",
+            "message": "hi",
+        }
+        client.post(
+            "/api/v1/analytics/stream",
+            json=payload,
+            headers={
+                "Authorization": "Bearer test-token",
+                "X-User-Email": "alice@example.com",
+                "X-User-Role": "manager",
+            },
+        )
+        assert len(captured_configs) == 1
+        thread_id = captured_configs[0]["configurable"]["thread_id"]
+        assert "alice@example.com" in thread_id
+        assert "shared-session-uuid" in thread_id
+
+    def test_two_users_with_same_session_id_get_distinct_thread_ids(
+        self, client, captured_configs
+    ):
+        payload = {
+            "session_id": "shared-session-uuid",
+            "message": "hi",
+        }
+        for email in ("alice@example.com", "bob@example.com"):
+            client.post(
+                "/api/v1/analytics/stream",
+                json=payload,
+                headers={
+                    "Authorization": "Bearer test-token",
+                    "X-User-Email": email,
+                    "X-User-Role": "manager",
+                },
+            )
+
+        assert len(captured_configs) == 2
+        thread_ids = [c["configurable"]["thread_id"] for c in captured_configs]
+        assert thread_ids[0] != thread_ids[1], (
+            "Same session_id with different X-User-Email MUST get "
+            "different thread_ids on /stream too — same contract as /chat."
+        )
+        assert "alice@example.com" in thread_ids[0]
+        assert "bob@example.com" in thread_ids[1]
