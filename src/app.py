@@ -77,6 +77,38 @@ def _make_conversation_store():
     return MemoryConversationStore()
 
 
+async def _fetch_schema_context(data_bridge) -> str:
+    """Call data-mcp's get_schema_context tool once at startup.
+
+    Returns the Markdown payload, or an empty string when the bridge isn't
+    connected, the tool isn't registered, or the call fails. The router
+    handles an empty value gracefully (logs a warning, runs with no schema
+    knowledge — useful for unit tests and degraded environments).
+    """
+    if data_bridge is None or not getattr(data_bridge, "is_connected", False):
+        log.warning("schema_context_skipped", reason="data-mcp bridge not connected")
+        return ""
+    try:
+        tools = await data_bridge.get_langchain_tools()
+    except Exception as exc:
+        log.warning("schema_context_tools_failed", error=str(exc))
+        return ""
+    schema_tool = next((t for t in tools if t.name == "get_schema_context"), None)
+    if schema_tool is None:
+        log.warning("schema_context_tool_missing")
+        return ""
+    try:
+        result = await schema_tool.ainvoke({})
+    except Exception as exc:
+        log.warning("schema_context_call_failed", error=str(exc))
+        return ""
+    if not isinstance(result, str) or not result.strip():
+        log.warning("schema_context_empty_result")
+        return ""
+    log.info("schema_context_loaded", chars=len(result))
+    return result
+
+
 # --------------------------------------------------------------------
 # Lifespan — the ONLY place that performs startup I/O
 # --------------------------------------------------------------------
@@ -122,8 +154,19 @@ async def lifespan(app: FastAPI):
     for name, bridge in bridges.items():
         log.info("mcp_startup_status", server=name, connected=bridge.is_connected)
 
+    # Fetch live database schema context from data-mcp once at startup.
+    # Result is injected into the router's system prompt so the LLM never
+    # hallucinates columns or joins. Falls back to empty string on failure;
+    # the router prints a visible warning rather than erroring out.
+    schema_context = await _fetch_schema_context(bridges.get("data-mcp"))
+
     checkpointer = await setup_checkpointer(config)
-    graph = build_analytics_graph(bridges=bridges, config=config, checkpointer=checkpointer)
+    graph = build_analytics_graph(
+        bridges=bridges,
+        config=config,
+        checkpointer=checkpointer,
+        schema_context=schema_context,
+    )
 
     conversation_store = _make_conversation_store()
     if hasattr(conversation_store, "connect"):

@@ -96,6 +96,7 @@ def build_analytics_graph(
     config: "AgentConfig | None" = None,
     prompts: Optional[PromptLoader] = None,
     checkpointer=None,
+    schema_context: str = "",
 ):
     """Build the Analytics Agent StateGraph.
 
@@ -147,6 +148,7 @@ def build_analytics_graph(
         tools_provider=deps.tools_provider,
         prompts=deps.prompts,
         compaction=deps.compaction,
+        schema_context=schema_context,
     )
     tool_node = MCPToolCallerNode(tools_provider=deps.tools_provider)
     synth_node = SynthesisNode(

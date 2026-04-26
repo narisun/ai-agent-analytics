@@ -78,116 +78,7 @@ when you are highly confident they apply.
     - If you proceed with an assumption, STATE it clearly in the reasoning field
       (e.g. "Assuming user means Opportunity pipeline, not payment volume")
 
-## Database Schema Reference (for SQL queries via data-mcp)
-
-The PostgreSQL database has two schemas:
-
-**salesforce schema** — CRM data. Tables and columns use Pascal case and MUST be double-quoted.
-  ONLY these tables and columns exist — do NOT invent columns that are not listed here:
-
-  salesforce."Account" ("Id", "Name", "Type", "Industry", "AccountNumber", "Ownership", "Phone", "Website", "BillingStreet", "BillingCity", "BillingState", "BillingPostalCode", "BillingCountry", "AnnualRevenue", "NumberOfEmployees", "Rating")
-    — "Type" values: 'Customer - Direct', 'Customer - Channel', 'Technology Partner', 'Installation Partner'
-    — "Industry" values: 'Banking Client', 'Technology', 'Healthcare', 'Energy', 'Manufacturing', 'Retail', 'Financial Services'
-    — "Rating" values: 'Hot', 'Warm', 'Cold'
-    — "AnnualRevenue" is a CURRENT snapshot only. There is NO "PreviousAnnualRevenue",
-      "RevenueGrowth", "LastYearRevenue", "RevenueChange", or ANY other historical revenue column.
-      NEVER invent these columns — the query will fail with a database error.
-      For "declining revenue" / "revenue trend" / "revenue growth" analysis use one of:
-        (a) "Rating" IN ('Cold', 'Warm') as a proxy for struggling/at-risk accounts, OR
-        (b) JOIN to bankdw.fact_payments to compute payment volume trends over time as a
-            revenue proxy (see cross-schema JOINs below), showing accounts with low/falling volume.
-
-  salesforce."Opportunity" ("Id", "AccountId", "Pricebook2Id", "CampaignId", "Name", "StageName", "Amount", "CloseDate", "Type", "LeadSource", "Probability", "ForecastCategoryName", "NextStep", "Description")
-    — "StageName" values: 'Prospecting', 'Qualification', 'Needs Analysis', 'Value Proposition', 'Id. Decision Makers', 'Perception Analysis', 'Proposal/Price Quote', 'Negotiation/Review', 'Closed Won', 'Closed Lost'
-    — "ForecastCategoryName" values: 'Pipeline', 'Best Case', 'Commit', 'Omitted', 'Closed'
-    — "Type" values: 'New Customer', 'Existing Customer - Upgrade', 'Existing Customer - Replacement', 'Existing Customer - Downgrade'
-    — "Amount" is deal value in USD (measure|financial)
-
-  salesforce."Contact" ("Id", "AccountId", "FirstName", "LastName", "Email", "Phone", "Title", "Department", "MailingCity", "MailingState", "MailingCountry", "LeadSource")
-  salesforce."Case" ("Id", "AccountId", "ContactId", "CaseNumber", "Subject", "Description", "Status", "Priority", "Origin", "Type", "Reason", "SuppliedEmail", "SuppliedPhone", "CreatedDate", "ClosedDate")
-    — "Status" values: 'New', 'Working', 'Escalated', 'Closed'
-    — "Priority" values: 'High', 'Medium', 'Low'
-
-  salesforce."Lead" ("Id", "FirstName", "LastName", "Company", "Title", "Email", "Phone", "City", "State", "Country", "Status", "LeadSource", "Industry", "AnnualRevenue", "NumberOfEmployees", "Rating")
-    — "Status" values: 'Open - Not Contacted', 'Working - Contacted', 'Closed - Converted', 'Closed - Not Converted'
-
-  salesforce."Contract" ("Id", "AccountId", "ContractNumber", "StartDate", "EndDate", "Status", "ContractTerm", "OwnerExpirationNotice", "SpecialTerms")
-    — "Status" values: 'Draft', 'In Approval Process', 'Activated'
-
-  salesforce."Campaign" ("Id", "Name", "Type", "Status", "StartDate", "EndDate", "BudgetedCost", "ActualCost", "ExpectedRevenue", "IsActive")
-  salesforce."Task" ("Id", "Subject", "ActivityDate", "Status", "Priority", "WhoId", "WhatId", "Type", "Description")
-  salesforce."Event" ("Id", "Subject", "StartDateTime", "EndDateTime", "IsAllDayEvent", "Location", "WhoId", "WhatId", "Type", "Description")
-  salesforce."Product2" ("Id", "Name", "ProductCode", "Family", "IsActive", "Description")
-  salesforce."OpportunityLineItem" ("Id", "OpportunityId", "PricebookEntryId", "Quantity", "UnitPrice", "TotalPrice", "ServiceDate", "Description")
-  salesforce."OpportunityContactRole" ("Id", "OpportunityId", "ContactId", "Role", "IsPrimary")
-  salesforce."CampaignMember" ("Id", "CampaignId", "ContactId", "LeadId", "Status", "HasResponded")
-  salesforce."Pricebook2" ("Id", "Name", "IsActive", "Description")
-  salesforce."PricebookEntry" ("Id", "Pricebook2Id", "Product2Id", "UnitPrice", "IsActive")
-
-  NOTE: There is NO "Region" column. For geographic analysis, use "BillingState"/"BillingCountry" on Account,
-  or JOIN Opportunity to Account via "AccountId" to get location data.
-
-**bankdw schema** — Banking/payments data warehouse. Table names are lowercase, column names
-  are Pascal case and MUST be double-quoted:
-
-  bankdw.fact_payments ("TransactionID", "TransactionDate", "PayorName", "PayorAccountNumber", "PayorBank", "PayorRoutingNumber", "PayeeName", "PayeeAccountNumber", "PayeeBank", "PayeeRoutingNumber", "TransactionType", "Amount", "Currency", "Status")
-    — Central fact table for all payment transactions
-    — TRANSACTION MODEL: Every transaction has TWO parties:
-        • "PayorName" = the SENDER (company sending money)
-        • "PayeeName" = the RECEIVER (company receiving money)
-      Both are company names that join to dim_party."PartyName" and salesforce."Account"."Name".
-      IMPORTANT: When the user says "party", "counterparty", "client", or "company" in the context
-      of a transaction, they may mean EITHER side. Always consider BOTH "PayorName" AND "PayeeName"
-      unless the user specifically says "sender"/"payor" or "receiver"/"payee".
-      Example: "which party of Costco uses wires most" → query BOTH sides:
-        WHERE ("PayorName" ILIKE '%Costco%' OR "PayeeName" ILIKE '%Costco%')
-      Then GROUP BY the OTHER party to show counterparties, or GROUP BY role to show direction.
-    — "PayorBank"/"PayeeBank" = bank name, joins to dim_bank."BankName"
-    — "TransactionType" values: 'ACH Credit', 'ACH Debit', 'Wire Transfer', 'RTP Credit', 'Check Payment', 'ACH Return', 'Wire Return'
-    — "Status" values: 'Completed', 'Pending', 'Failed', 'Returned', 'Reversed'
-    — "Amount" is transaction value in USD (measure|financial)
-    — "Currency" is always 'USD'
-
-  bankdw.dim_party ("PartyKey", "PartyID", "PartyName", "PartyRoleType", "PartyType", "CustomerSegment", "KYCStatus", "RiskRating", "AMLRiskCategory", "SanctionsScreeningStatus", "PEPFlag", "IndustrySector", "CountryCode", "StateProvinceCode", "City", "PostalCode", "PreferredChannel", "FraudMonitoringSegment", "CustomerStatus", "OnboardingDate", "RelationshipStartDate")
-    — "PartyName" is the key join column to fact_payments and salesforce."Account"."Name"
-    — "CustomerSegment" values: 'Retail', 'Commercial', 'Corporate', 'Institutional'
-    — "RiskRating" values: 'Low', 'Medium', 'Elevated', 'High'
-    — "CustomerStatus" values: 'Active', 'Inactive', 'Suspended', 'Closed'
-
-  bankdw.dim_bank ("BankKey", "BankID", "BankName", "BankRoleType", "RoutingNumber", "SWIFTBIC", "BankType", "OwnershipType", "CountryCode", "HeadquartersState", "HeadquartersCity", "Regulator", "ClearingNetworksSupported", "CorrespondentBankFlag", "SettlementCurrency", "LiquidityTier", "BSAAMLProgramRating", "SanctionsComplianceStatus", "BankStatus")
-    — "BankName" is the key join column to fact_payments."PayorBank"/"PayeeBank"
-    — "BankType" values: 'National Bank', 'State Bank', 'Credit Union', 'Savings Institution'
-
-  bankdw.dim_product ("ProductKey", "ProductID", "ProductName", "ProductCategory", "ProductFamily", "PaymentRail", "Directionality", "SettlementMethod", "SettlementSpeed", "TypicalUseCase", "RiskLevel", "CrossBorderCapability", "DefaultCurrency", "GeographyScope", "ProductStatus")
-    — "ProductCategory" values: 'Credit Transfer', 'Debit Transfer', 'Check', 'Real-Time'
-    — "PaymentRail" values: 'ACH Credit', 'ACH Debit', 'Fedwire', 'RTP', 'Check Clearing'
-
-  bankdw.bridge_party_account ("PartyAccountKey", "PartyName", "AccountNumber", "BankName", "RoutingNumber", "PartyID", "BankID", "AccountType", "AccountStatus", "CurrencyCode")
-    — Links parties to their bank accounts; use to find which bank a party uses
-
-## JOIN RELATIONSHIPS (use these exact column pairs)
-
-### Within bankdw schema (text-based joins — values must match exactly):
-  fact_payments."PayorName"  = dim_party."PartyName"     (text match — payor lookup)
-  fact_payments."PayeeName"  = dim_party."PartyName"     (text match — payee lookup)
-  fact_payments."PayorBank"  = dim_bank."BankName"       (text match — payor bank)
-  fact_payments."PayeeBank"  = dim_bank."BankName"       (text match — payee bank)
-  bridge_party_account."PartyID" = dim_party."PartyID"   (FK — party accounts)
-  bridge_party_account."BankID"  = dim_bank."BankID"     (FK — account bank)
-
-### Cross-schema (salesforce ↔ bankdw — the bridge between CRM and payments):
-  salesforce."Account"."Name"  = bankdw.dim_party."PartyName"        (text match)
-  salesforce."Account"."Name"  = bankdw.fact_payments."PayorName"    (text match)
-  salesforce."Account"."Name"  = bankdw.fact_payments."PayeeName"    (text match)
-
-### Within salesforce schema (FK-based joins):
-  "Opportunity"."AccountId"          = "Account"."Id"
-  "Contact"."AccountId"              = "Account"."Id"
-  "Case"."AccountId"                 = "Account"."Id"
-  "Contract"."AccountId"             = "Account"."Id"
-  "OpportunityLineItem"."OpportunityId" = "Opportunity"."Id"
-  "OpportunityContactRole"."OpportunityId" = "Opportunity"."Id"
-  "CampaignMember"."CampaignId"     = "Campaign"."Id"
+{schema_context}
 
 ## TOOL ROUTING RULES (MANDATORY — follow these BEFORE writing any query_plan)
 
@@ -262,25 +153,11 @@ RULE 6 — BANK-SPECIFIC QUERIES → execute_read_query on PayorBank/PayeeBank:
        "TransactionDate" >= date_trunc('quarter', CURRENT_DATE) - interval '3 months'
        AND "TransactionDate" < date_trunc('quarter', CURRENT_DATE)
 
-  8. dim_product.PaymentRail ≠ fact_payments.TransactionType — values do NOT match exactly.
-     ALWAYS use this mapping when the user refers to a product name or payment rail:
-
-     Product display name                 PaymentRail    → TransactionType filter
-     ─────────────────────────────────────────────────────────────────────────────
-     "RTP (Real-Time Payment)" / "RTP"    'RTP'          → "TransactionType" = 'RTP Credit'
-     "Domestic Wire" / "Wire" / "Fedwire" 'Fedwire'      → "TransactionType" = 'Wire Transfer'
-     "ACH Credit"                         'ACH Credit'   → "TransactionType" = 'ACH Credit'
-     "ACH Debit"                          'ACH Debit'    → "TransactionType" = 'ACH Debit'
-     "Check" / "Check Clearing"           'Check Clearing' → "TransactionType" IN ('Check Payment')
-
-     When the user mentions a product by name from a previous chart, translate it using this
-     table and filter fact_payments on "TransactionType" directly. Do NOT use PaymentRail as a
-     filter on fact_payments — that column does not exist on fact_payments.
-     To ALSO show product metadata alongside results, JOIN dim_product like:
-       JOIN bankdw.dim_product dp ON fp."TransactionType" = dp."PaymentRail"
-     Note: ACH Credit / ACH Debit are the same between both tables and join correctly.
-     For RTP: fact_payments "TransactionType" = 'RTP Credit', dim_product "PaymentRail" = 'RTP'
-     — these do NOT join directly. Filter with WHERE "TransactionType" = 'RTP Credit' instead.
+  8. dim_product.PaymentRail and fact_payments.TransactionType use the SAME enum
+     values (see schema_context above for the live list). Filter directly on
+     "TransactionType" for the rail, and JOIN dim_product when you need product
+     metadata: ON fp."TransactionType" = dp."PaymentRail" — no value translation
+     is required.
 
 ## EXAMPLES — query_plan with parameters (FOLLOW THIS FORMAT)
 
@@ -549,11 +426,13 @@ class IntentRouterNode:
         tools_provider,
         prompts,
         compaction,
+        schema_context: str = "",
     ) -> None:
         self._llm = llm
         self._tools_provider = tools_provider
         self._prompts = prompts
         self._compaction = compaction
+        self._schema_context = schema_context
         self._structured_llm = llm.with_structured_output(IntentResult)
         self._cached_prompt: str | None = None
 
@@ -591,8 +470,20 @@ class IntentRouterNode:
                 log.warning("tool_catalog_provider_error", error=str(exc))
                 tools = []
             tool_catalog = _format_tools_as_catalog(tools)
-            self._cached_prompt = _ROUTER_SYSTEM_PROMPT_HEADER.format(tool_catalog=tool_catalog)
-            log.info("tool_catalog_built", length=len(tool_catalog))
+            schema_context = self._schema_context or (
+                "_(Schema context unavailable — get_schema_context tool did not "
+                "respond at startup. The agent may hallucinate column names; "
+                "investigate the data-mcp logs.)_"
+            )
+            self._cached_prompt = _ROUTER_SYSTEM_PROMPT_HEADER.format(
+                tool_catalog=tool_catalog,
+                schema_context=schema_context,
+            )
+            log.info(
+                "router_prompt_built",
+                tool_catalog_chars=len(tool_catalog),
+                schema_context_chars=len(schema_context),
+            )
         system_content = self._cached_prompt
         if has_data:
             raw_context = state.get("raw_data_context") or {}
@@ -616,13 +507,11 @@ class IntentRouterNode:
                     entity_lines += f"  Products: {entities['products']}\n"
                 entity_lines += (
                     "Remember:\n"
-                    "  • Banks   → RULE 6 (PayorBank/PayeeBank ILIKE filter, NOT get_payment_summary)\n"
-                    "  • Parties → RULE 1 (get_payment_summary with client_name)\n"
-                    "  • Products → SQL RULE 8 (map ProductName/PaymentRail to TransactionType value)\n"
-                    "    e.g. 'RTP (Real-Time Payment)' / PaymentRail='RTP' → TransactionType='RTP Credit'\n"
-                    "    e.g. 'Domestic Wire' / PaymentRail='Fedwire' → TransactionType='Wire Transfer'\n"
-                    "  CRITICAL: If the user's query involves BOTH a bank AND a product, apply BOTH rules:\n"
-                    "    use PayorBank/PayeeBank for the bank filter AND TransactionType for the product filter.\n"
+                    "  • Banks    → filter PayorBank/PayeeBank with ILIKE (NOT get_payment_summary).\n"
+                    "  • Parties  → use get_payment_summary with client_name.\n"
+                    "  • Products → filter on fact_payments.TransactionType (same enum as\n"
+                    "               dim_product.PaymentRail; no value translation needed).\n"
+                    "  Combined queries: apply each filter on its matching column.\n"
                 )
 
             # Detect if previous results had errors (no data, client not found, etc.)
@@ -724,7 +613,8 @@ class IntentRouterNode:
 
 
 def make_intent_router_node(router_llm, bridges: dict, prompts: PromptLoader = None,
-                            compaction_modifier: Optional[Callable] = None):
+                            compaction_modifier: Optional[Callable] = None,
+                            schema_context: str = ""):
     """Deprecated shim — retained until graph.py migrates to GraphDependencies.
 
     Wraps the bridges dict into an MCPToolsProvider adapter and returns an
@@ -737,6 +627,9 @@ def make_intent_router_node(router_llm, bridges: dict, prompts: PromptLoader = N
         bridges: Dict mapping MCP server names to MCPToolBridge instances.
         prompts: Optional PromptLoader for template overrides.
         compaction_modifier: Optional callable to trim messages before LLM call.
+        schema_context: Markdown describing the live database schema.
+            Pass the result of data-mcp's get_schema_context tool here so
+            the router prompt reflects the actual columns/joins/perspectives.
     """
 
     class _BridgeToolsProvider:
@@ -776,6 +669,7 @@ def make_intent_router_node(router_llm, bridges: dict, prompts: PromptLoader = N
         tools_provider=_BridgeToolsProvider(),
         prompts=prompts,
         compaction=compaction,
+        schema_context=schema_context,
     )
 
 
