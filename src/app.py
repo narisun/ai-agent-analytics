@@ -202,11 +202,26 @@ def create_app(deps: AppDependencies) -> FastAPI:
 
     application.state.deps = deps
 
-    # CORS — TODO(production): tighten per environment via ALLOWED_ORIGINS.
+    # CORS — tightened to avoid wildcard + credentials (invalid per CORS spec).
+    raw_origins = os.getenv("ALLOWED_ORIGINS")
+    if raw_origins and raw_origins != "*":
+        allowed_origins = [o.strip() for o in raw_origins.split(",") if o.strip()]
+        allow_credentials = True
+    else:
+        # Wildcard + credentials is invalid per CORS spec — browsers reject it.
+        # Default to wildcard origins with credentials disabled. Production must
+        # set ALLOWED_ORIGINS to an explicit comma-separated list.
+        allowed_origins = ["*"]
+        allow_credentials = False
+        log.warning(
+            "cors_wildcard_no_credentials",
+            hint="set ALLOWED_ORIGINS=https://your.dashboard.example to enable credentials",
+        )
+
     application.add_middleware(
         CORSMiddleware,
-        allow_origins=os.getenv("ALLOWED_ORIGINS", "*").split(","),
-        allow_credentials=True,
+        allow_origins=allowed_origins,
+        allow_credentials=allow_credentials,
         allow_methods=["*"],
         allow_headers=["*"],
     )
