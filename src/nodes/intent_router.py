@@ -21,6 +21,7 @@ from ..state import AnalyticsState, migrate_state
 
 log = get_logger(__name__)
 
+VALID_INTENTS = {"data_query", "follow_up", "clarification"}
 
 _ROUTER_SYSTEM_PROMPT_HEADER = """You are an intent classifier for an enterprise analytics platform.
 
@@ -655,6 +656,23 @@ class IntentRouterNode:
             result = await self._structured_llm.ainvoke(
                 [SystemMessage(content=system_content)] + messages
             )
+
+            # P0 fix: validate intent is one of the known values. The LLM can hallucinate
+            # an unknown intent string; without this guard, route_after_intent() returns
+            # an unmapped key and LangGraph raises ValueError on the conditional edge.
+            raw_intent = result.intent
+            if raw_intent not in VALID_INTENTS:
+                log.warning(
+                    "intent_router_unknown_intent",
+                    raw_intent=raw_intent,
+                    action="rewriting_to_clarification",
+                )
+                return {
+                    **migration_updates,
+                    "intent": "clarification",
+                    "intent_reasoning": f"Unknown intent returned by router: {raw_intent!r}",
+                    "query_plan": [],
+                }
 
             plan_dump = [s.model_dump() for s in result.query_plan]
             log.info(
