@@ -9,6 +9,7 @@ Intent types:
   - follow_up:     User asks about previously retrieved data → skip tools, go to synthesis
   - clarification: Ambiguous request → ask user for more detail
 """
+import asyncio
 import json
 from typing import Callable, Optional
 
@@ -575,7 +576,17 @@ class IntentRouterNode:
         # Build system prompt with dynamic tool catalog (cached after first call)
         if self._cached_prompt[0] is None:
             try:
-                tools = await self._tools_provider.get_langchain_tools(user_ctx)
+                tools = await asyncio.wait_for(
+                    self._tools_provider.get_langchain_tools(user_ctx),
+                    timeout=10.0,
+                )
+            except asyncio.TimeoutError:
+                log.warning(
+                    "intent_router_tools_timeout",
+                    timeout_seconds=10.0,
+                    action="proceeding_with_empty_tool_catalog",
+                )
+                tools = []
             except Exception as exc:
                 log.warning("tool_catalog_provider_error", error=str(exc))
                 tools = []
