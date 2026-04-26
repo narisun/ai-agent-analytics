@@ -555,7 +555,7 @@ class IntentRouterNode:
         self._prompts = prompts
         self._compaction = compaction
         self._structured_llm = llm.with_structured_output(IntentResult)
-        self._cached_prompt: list[str | None] = [None]  # mutable container for caching
+        self._cached_prompt: str | None = None
 
     async def __call__(self, state: AnalyticsState, config=None) -> dict:
         # Migrate checkpointed state from older schema versions before any processing.
@@ -574,7 +574,7 @@ class IntentRouterNode:
             user_ctx = (config or {}).get("configurable", {}).get("user_ctx")
 
         # Build system prompt with dynamic tool catalog (cached after first call)
-        if self._cached_prompt[0] is None:
+        if self._cached_prompt is None:
             try:
                 tools = await asyncio.wait_for(
                     self._tools_provider.get_langchain_tools(user_ctx),
@@ -591,9 +591,9 @@ class IntentRouterNode:
                 log.warning("tool_catalog_provider_error", error=str(exc))
                 tools = []
             tool_catalog = _format_tools_as_catalog(tools)
-            self._cached_prompt[0] = _ROUTER_SYSTEM_PROMPT_HEADER.format(tool_catalog=tool_catalog)
+            self._cached_prompt = _ROUTER_SYSTEM_PROMPT_HEADER.format(tool_catalog=tool_catalog)
             log.info("tool_catalog_built", length=len(tool_catalog))
-        system_content = self._cached_prompt[0]
+        system_content = self._cached_prompt
         if has_data:
             raw_context = state.get("raw_data_context") or {}
             available_keys = list(raw_context.keys())
