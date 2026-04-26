@@ -66,6 +66,20 @@ narrative — do not manufacture a component for the sake of having one.
   Do not pad rows with a `value` column unless there's a real measure to
   put there.
 
+  **Column-name conventions (the frontend infers cell formatting from the
+  column name, so naming is load-bearing):**
+    - Money:  end the column with `_usd` or include amount/total/revenue/
+      volume/balance — e.g. `total_usd`, `revenue`, `pipeline_amount`.
+      These render as currency ($1.2M).
+    - Counts: end with `_count` or use `count`, `tx_count`, `txn_count`,
+      `cnt`. These render as plain numbers (1,234) — NEVER currency.
+    - Percents: end with `_pct` or `_rate` (e.g. `growth_pct`, `return_rate`).
+    - Dates: include `date` / `_at` / `_dt` in the name.
+  Mixed table example:
+    ✅ [{{"bank": "BMO", "tx_count": 1240, "total_usd": 87500000}}]
+    ❌ [{{"bank": "BMO", "value": 1240, "amount": 87500000}}]
+       (ambiguous — `value` could be either)
+
 ## Choosing well
 
 - Question is "what are the X used by Y?" → list the X items in the
