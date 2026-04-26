@@ -1,25 +1,30 @@
 """Endpoint-level proof that LangGraph thread_id is tenant-scoped.
 
-Bypasses the FastAPI lifespan by injecting a fake graph and a fake
-conversation_store directly into `app.state` (same pattern as
-`test_e2e_streaming.py::app_with_mocks`), overrides auth and rate-limit
-dependencies, and asserts that two requests with the same session_id
-but different X-User-Email values arrive at the graph with distinct
-`configurable.thread_id` values.
+Builds AppDependencies with a stub graph and a chat_service_factory that
+captures the run_config passed to graph.astream_events. Verifies that
+two requests with the same conversation_id but different X-User-Email
+headers arrive at the graph with distinct configurable.thread_id
+values — Phase 0b's tenant-isolation guarantee, validated through the
+new SoC/DI structure.
 """
 import os
+from contextlib import contextmanager
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from fastapi.testclient import TestClient
 
-# IMPORTANT: set INTERNAL_API_KEY before importing app.py — module-level
-# `make_api_key_verifier()` reads the env at request time but the
-# dependency_overrides bypass the verifier entirely. We still set it so
-# importing app.py doesn't surface unrelated config errors.
+# Set INTERNAL_API_KEY so any module that reads it at import time
+# does not surface unrelated config errors.
 os.environ.setdefault("INTERNAL_API_KEY", "test-internal-api-key")
 
-from src.app import app, verify_api_key, check_rate_limit  # noqa: E402
+from src.app import create_app  # noqa: E402
+from src.app_dependencies import AppDependencies  # noqa: E402
+from src.domain.types import ChatRequest, UserContext  # noqa: E402
+from src.services.chat_service import ChatService  # noqa: E402
+from tests.fakes.fake_conversation_store import FakeConversationStore  # noqa: E402
+from tests.fakes.fake_stream_encoder import FakeStreamEncoder  # noqa: E402
+from tests.fakes.fake_telemetry import FakeTelemetryScope  # noqa: E402
 
 
 @pytest.fixture
@@ -30,40 +35,50 @@ def captured_configs():
 
 @pytest.fixture
 def client(captured_configs):
-    """TestClient with a stub graph + store and overridden auth/rate-limit deps.
-
-    Uses `app.state.X =` injection (no lifespan), exactly as
-    `test_e2e_streaming.py::app_with_mocks` does. The /chat endpoint
-    reads `app.state.conversation_store` mid-stream to persist messages,
-    so we stub it with AsyncMocks. The /stream endpoint does not
-    persist, but the same fixture serves both. After the test, all
-    overrides are removed so subsequent tests see a clean app.
-    """
+    """TestClient over create_app(deps) with stub graph and ChatService factory."""
 
     async def fake_astream_events(state, config, version):
         captured_configs.append(config)
-        # Async generator that yields nothing — the endpoint code path
-        # finishes the stream cleanly with no events.
         if False:
             yield  # pragma: no cover
 
     fake_graph = MagicMock()
     fake_graph.astream_events = fake_astream_events
 
-    fake_store = MagicMock()
-    fake_store.get_conversation = AsyncMock(return_value=None)
-    fake_store.create_conversation = AsyncMock(return_value=None)
-    fake_store.add_message = AsyncMock(return_value=None)
+    store = FakeConversationStore()
+    # Existing dashboard endpoints expect the legacy add_message/etc methods;
+    # the test's path doesn't actually call those (FakeConversationStore has
+    # them as protocol methods only), so we only need add_message to exist.
+    store.add_message = AsyncMock(return_value=None)
+    store.get_conversation = AsyncMock(return_value=None)
+    store.create_conversation = AsyncMock(return_value=None)
 
-    app.state.graph = fake_graph
-    app.state.conversation_store = fake_store
+    config = MagicMock()
 
-    app.dependency_overrides[verify_api_key] = lambda: "test-token"
-    app.dependency_overrides[check_rate_limit] = lambda: None
+    def chat_service_factory(user_ctx: UserContext) -> ChatService:
+        return ChatService(
+            graph=fake_graph,
+            conversation_store=store,
+            config=config,
+            user_ctx=user_ctx,
+            encoder_factory=lambda: FakeStreamEncoder(),
+            telemetry=FakeTelemetryScope(),
+        )
 
+    deps = AppDependencies(
+        config=config,
+        graph=fake_graph,
+        conversation_store=store,
+        mcp_tools_provider=None,
+        llm_factory=None,
+        telemetry=FakeTelemetryScope(),
+        compaction=None,
+        encoder_factory=lambda: FakeStreamEncoder(),
+        chat_service_factory=chat_service_factory,
+    )
+
+    app = create_app(deps)
     yield TestClient(app)
-
-    app.dependency_overrides.clear()
 
 
 class TestChatEndpointThreadIdIsolation:
@@ -105,30 +120,23 @@ class TestChatEndpointThreadIdIsolation:
                     "X-User-Role": "manager",
                 },
             )
-
         assert len(captured_configs) == 2
         thread_ids = [c["configurable"]["thread_id"] for c in captured_configs]
-        assert thread_ids[0] != thread_ids[1], (
-            "Two distinct users with the same session_id MUST get "
-            "distinct thread_ids — this is the tenant-isolation guarantee."
-        )
+        assert thread_ids[0] != thread_ids[1]
         assert "alice@example.com" in thread_ids[0]
         assert "bob@example.com" in thread_ids[1]
 
 
 class TestStreamEndpointThreadIdIsolation:
-    """Cross-user isolation contract for POST /api/v1/analytics/stream.
+    """Cross-user isolation contract for legacy POST /api/v1/analytics/stream.
 
-    The legacy SSE endpoint must mirror /chat's tenant-scoping. Today
-    /stream does not even read X-User-Email — these tests assert that
-    after Task 3 it does, and that thread_id is namespaced the same way.
+    The legacy endpoint uses anonymous fallback when X-User-Email is absent;
+    when present, the email feeds make_thread_id and produces tenant-scoped
+    thread_ids the same as the /chat path.
     """
 
     def test_thread_id_includes_user_email(self, client, captured_configs):
-        payload = {
-            "session_id": "shared-session-uuid",
-            "message": "hi",
-        }
+        payload = {"session_id": "shared-session-uuid", "message": "hi"}
         client.post(
             "/api/v1/analytics/stream",
             json=payload,
@@ -146,10 +154,7 @@ class TestStreamEndpointThreadIdIsolation:
     def test_two_users_with_same_session_id_get_distinct_thread_ids(
         self, client, captured_configs
     ):
-        payload = {
-            "session_id": "shared-session-uuid",
-            "message": "hi",
-        }
+        payload = {"session_id": "shared-session-uuid", "message": "hi"}
         for email in ("alice@example.com", "bob@example.com"):
             client.post(
                 "/api/v1/analytics/stream",
@@ -160,12 +165,8 @@ class TestStreamEndpointThreadIdIsolation:
                     "X-User-Role": "manager",
                 },
             )
-
         assert len(captured_configs) == 2
         thread_ids = [c["configurable"]["thread_id"] for c in captured_configs]
-        assert thread_ids[0] != thread_ids[1], (
-            "Same session_id with different X-User-Email MUST get "
-            "different thread_ids on /stream too — same contract as /chat."
-        )
+        assert thread_ids[0] != thread_ids[1]
         assert "alice@example.com" in thread_ids[0]
         assert "bob@example.com" in thread_ids[1]
