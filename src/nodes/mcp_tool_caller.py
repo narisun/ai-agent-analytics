@@ -24,107 +24,60 @@ from ..state import AnalyticsState
 log = get_logger(__name__)
 
 
-def make_mcp_tool_caller_node(bridges: dict):
-    """Build the MCP tool caller node.
+def _extract_client_name(step: dict) -> str | None:
+    """Extract the client_name parameter from a plan step if present."""
+    params = step.get("parameters", {})
+    return params.get("client_name")
 
-    Args:
-        bridges: Dict mapping MCP server names to MCPToolBridge instances.
-                 Example: {"data-mcp": bridge1, "salesforce-mcp": bridge2, ...}
+
+def _is_client_not_found(result) -> bool:
+    """Check if a tool result indicates the client was not found."""
+    if isinstance(result, str):
+        try:
+            parsed = json.loads(result)
+            if isinstance(parsed, dict):
+                error = parsed.get("error", "")
+                message = parsed.get("message", "")
+                if error == "client_not_found":
+                    return True
+                if "not found" in str(message).lower():
+                    return True
+                if "no data" in str(message).lower():
+                    return True
+        except (json.JSONDecodeError, TypeError):
+            pass
+        # Check raw string
+        lower = result.lower()
+        if "not found" in lower or "no data" in lower or "no results" in lower:
+            return True
+    elif isinstance(result, dict):
+        if result.get("error") == "client_not_found":
+            return True
+        if "not found" in str(result.get("message", "")).lower():
+            return True
+    return False
+
+
+class MCPToolCallerNode:
+    """Callable class for the MCP tool caller node.
+
+    Constructor-injected with a ``tools_provider`` (MCPToolsProvider Protocol)
+    that provides a flat list of all available langchain tools.
+
+    See ``make_mcp_tool_caller_node`` for the backward-compat shim that wraps
+    the legacy bridges-dict interface.
     """
 
-    async def _find_similar_clients(client_name: str, session_id: str) -> list[str]:
-        """Query the database for client names similar to the given name.
+    def __init__(self, *, tools_provider) -> None:
+        self._tools_provider = tools_provider
 
-        Uses parameterized ILIKE matching against both Salesforce Account and
-        payments dim_party tables. The client_name is passed as a bind parameter
-        to prevent SQL injection.
-        """
-        data_bridge = bridges.get("data-mcp")
-        if not data_bridge or not data_bridge.is_connected:
-            return []
-
-        try:
-            tools = await data_bridge.get_langchain_tools()
-            query_tool = next((t for t in tools if t.name == "execute_read_query"), None)
-            if not query_tool:
-                return []
-
-            # SECURITY: Use parameterized query to prevent SQL injection.
-            # The $1 placeholder is bound to the ILIKE pattern at execution time.
-            sql = """
-                SELECT DISTINCT name FROM (
-                    SELECT "Name" AS name
-                    FROM salesforce."Account"
-                    WHERE "Name" ILIKE $1
-                    UNION
-                    SELECT "PartyName" AS name
-                    FROM bankdw.dim_party
-                    WHERE "PartyName" ILIKE $1
-                ) matches
-                ORDER BY name
-                LIMIT 5
-            """
-            like_pattern = f"%{client_name}%"
-
-            params = {"query": sql, "params": [like_pattern]}
-            if query_tool.args_schema:
-                schema = query_tool.args_schema.model_json_schema()
-                if "session_id" in schema.get("properties", {}):
-                    params["session_id"] = session_id or "analytics-default"
-
-            result = await query_tool.ainvoke(params)
-
-            # Parse the result to extract names
-            if isinstance(result, str):
-                try:
-                    parsed = json.loads(result)
-                    if isinstance(parsed, list):
-                        return [row.get("name", "") for row in parsed if row.get("name")]
-                    elif isinstance(parsed, dict) and "rows" in parsed:
-                        return [row.get("name", "") for row in parsed["rows"] if row.get("name")]
-                except json.JSONDecodeError:
-                    pass
-
-            return []
-        except Exception as exc:
-            log.warning("similar_client_search_error", error=str(exc))
-            return []
-
-    def _extract_client_name(step: dict) -> str | None:
-        """Extract the client_name parameter from a plan step if present."""
-        params = step.get("parameters", {})
-        return params.get("client_name")
-
-    def _is_client_not_found(result) -> bool:
-        """Check if a tool result indicates the client was not found."""
-        if isinstance(result, str):
-            try:
-                parsed = json.loads(result)
-                if isinstance(parsed, dict):
-                    error = parsed.get("error", "")
-                    message = parsed.get("message", "")
-                    if error == "client_not_found":
-                        return True
-                    if "not found" in str(message).lower():
-                        return True
-                    if "no data" in str(message).lower():
-                        return True
-            except (json.JSONDecodeError, TypeError):
-                pass
-            # Check raw string
-            lower = result.lower()
-            if "not found" in lower or "no data" in lower or "no results" in lower:
-                return True
-        elif isinstance(result, dict):
-            if result.get("error") == "client_not_found":
-                return True
-            if "not found" in str(result.get("message", "")).lower():
-                return True
-        return False
-
-    async def mcp_tool_caller(state: AnalyticsState) -> dict:
+    async def __call__(self, state: AnalyticsState, config=None) -> dict:
         plan = state.get("query_plan", [])
         session_id = state.get("session_id", "")
+
+        # Extract user_ctx from LangGraph config if available
+        user_ctx = (config or {}).get("configurable", {}).get("user_ctx")
+
         if not plan:
             log.warning("mcp_tool_caller_empty_plan")
             return {
@@ -132,6 +85,13 @@ def make_mcp_tool_caller_node(bridges: dict):
                 "active_tools": [],
                 "errors": ["mcp_tool_caller: empty query plan"],
             }
+
+        # Fetch all available tools once (shared across all steps)
+        try:
+            all_tools = await self._tools_provider.get_langchain_tools(user_ctx)
+        except Exception as exc:
+            log.error("mcp_tools_provider_error", error=str(exc))
+            all_tools = []
 
         active_tools = []
         results = {}
@@ -153,29 +113,16 @@ def make_mcp_tool_caller_node(bridges: dict):
             }
             active_tools.append(tool_info)
 
-            bridge = bridges.get(server_name)
-            if bridge is None:
-                error_msg = f"Unknown MCP server: {server_name}"
-                log.error("mcp_unknown_server", server=server_name)
+            tool_fn = next((t for t in all_tools if t.name == tool_name), None)
+
+            if tool_fn is None:
+                available = [t.name for t in all_tools]
+                error_msg = f"Tool '{tool_name}' not found on {server_name}. Available: {available}"
+                log.error("mcp_tool_not_found", tool=tool_name, server=server_name, available=available)
                 tool_info["status"] = "error"
                 return {result_key: {"error": error_msg}}
 
-            if not bridge.is_connected:
-                error_msg = f"MCP server {server_name} not connected"
-                log.warning("mcp_not_connected", server=server_name)
-                tool_info["status"] = "error"
-                return {result_key: {"error": error_msg, "fallback": True}}
-
             try:
-                available_tools = await bridge.get_langchain_tools()
-                tool_fn = next((t for t in available_tools if t.name == tool_name), None)
-                if tool_fn is None:
-                    available = [t.name for t in available_tools]
-                    error_msg = f"Tool '{tool_name}' not found on {server_name}. Available: {available}"
-                    log.error("mcp_tool_not_found", tool=tool_name, server=server_name, available=available)
-                    tool_info["status"] = "error"
-                    return {result_key: {"error": error_msg}}
-
                 # Inject session_id if the tool accepts it.
                 # Server-side injected — the LLM cannot override it.
                 # User auth context (auth_context) is injected automatically
@@ -227,7 +174,9 @@ def make_mcp_tool_caller_node(bridges: dict):
 
             if has_not_found:
                 for client_name in client_names_tried:
-                    similar = await _find_similar_clients(client_name, session_id)
+                    similar = await self._find_similar_clients(
+                        client_name, session_id, all_tools
+                    )
                     if similar:
                         suggestion_msg = (
                             f"Client '{client_name}' was not found. "
@@ -263,4 +212,83 @@ def make_mcp_tool_caller_node(bridges: dict):
             "errors": errors if errors else [],
         }
 
-    return mcp_tool_caller
+    async def _find_similar_clients(
+        self, client_name: str, session_id: str, available_tools: list
+    ) -> list[str]:
+        """Query the database for client names similar to the given name.
+
+        Uses parameterized ILIKE matching against both Salesforce Account and
+        payments dim_party tables. The client_name is passed as a bind parameter
+        to prevent SQL injection.
+        """
+        query_tool = next(
+            (t for t in available_tools if t.name == "execute_read_query"), None
+        )
+        if not query_tool:
+            return []
+
+        try:
+            # SECURITY: Use parameterized query to prevent SQL injection.
+            # The $1 placeholder is bound to the ILIKE pattern at execution time.
+            sql = """
+                SELECT DISTINCT name FROM (
+                    SELECT "Name" AS name
+                    FROM salesforce."Account"
+                    WHERE "Name" ILIKE $1
+                    UNION
+                    SELECT "PartyName" AS name
+                    FROM bankdw.dim_party
+                    WHERE "PartyName" ILIKE $1
+                ) matches
+                ORDER BY name
+                LIMIT 5
+            """
+            like_pattern = f"%{client_name}%"
+
+            params = {"query": sql, "params": [like_pattern]}
+            if query_tool.args_schema:
+                schema = query_tool.args_schema.model_json_schema()
+                if "session_id" in schema.get("properties", {}):
+                    params["session_id"] = session_id or "analytics-default"
+
+            result = await query_tool.ainvoke(params)
+
+            # Parse the result to extract names
+            if isinstance(result, str):
+                try:
+                    parsed = json.loads(result)
+                    if isinstance(parsed, list):
+                        return [row.get("name", "") for row in parsed if row.get("name")]
+                    elif isinstance(parsed, dict) and "rows" in parsed:
+                        return [row.get("name", "") for row in parsed["rows"] if row.get("name")]
+                except json.JSONDecodeError:
+                    pass
+
+            return []
+        except Exception as exc:
+            log.warning("similar_client_search_error", error=str(exc))
+            return []
+
+
+def make_mcp_tool_caller_node(bridges: dict):
+    """Build the MCP tool caller node. Backward-compat shim.
+
+    Args:
+        bridges: Dict mapping MCP server names to MCPToolBridge instances.
+                 Example: {"data-mcp": bridge1, "salesforce-mcp": bridge2, ...}
+    """
+
+    class _BridgeToolsProvider:
+        async def get_langchain_tools(self, user_ctx=None):
+            tools: list = []
+            for bridge in (bridges or {}).values():
+                if getattr(bridge, "is_connected", False):
+                    bridge_tools = (
+                        await bridge.get_langchain_tools(user_ctx)
+                        if user_ctx
+                        else await bridge.get_langchain_tools()
+                    )
+                    tools.extend(bridge_tools)
+            return tools
+
+    return MCPToolCallerNode(tools_provider=_BridgeToolsProvider())

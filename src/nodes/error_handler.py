@@ -12,10 +12,13 @@ from ..state import AnalyticsState
 log = get_logger(__name__)
 
 
-def make_error_handler_node():
-    """Build the error handler node."""
+class ErrorHandlerNode:
+    """Callable class for the error handler node — no dependencies."""
 
-    async def error_handler(state: AnalyticsState) -> dict:
+    def __init__(self) -> None:
+        pass
+
+    async def __call__(self, state: AnalyticsState, config=None) -> dict:
         intent = state.get("intent", "clarification")
         reasoning = state.get("intent_reasoning", "")
         errors = state.get("errors", [])
@@ -56,4 +59,7 @@ def make_error_handler_node():
             "messages": [AIMessage(content=message)],
         }
 
-    return error_handler
+
+def make_error_handler_node():
+    """Build the error handler node. Backward-compat shim."""
+    return ErrorHandlerNode()

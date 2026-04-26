@@ -95,37 +95,42 @@ Rules:
 """
 
 
-def make_synthesis_node(
-    synthesis_llm,
-    prompts=None,
-    compaction_modifier: Optional[Callable] = None,
-    chart_max_data_points: int = MAX_CHART_DATA_POINTS,
-):
-    """Build the synthesis node.
+class SynthesisNode:
+    """Callable class for the synthesis node.
 
-    Args:
-        synthesis_llm:         LangChain ChatModel configured with complex-routing.
-        prompts:               Optional PromptLoader for template overrides.
-        compaction_modifier:   Optional callable to trim messages before LLM call.
-        chart_max_data_points: Maximum data points per chart component.  Passed via
-                               AgentConfig.chart_max_data_points so operators can tune
-                               it without a code change.  Defaults to MAX_CHART_DATA_POINTS (20).
+    Constructor-injected with ``llm``, ``prompts``, ``compaction``
+    (CompactionModifier Protocol), and ``chart_max_data_points``.
+
+    See ``make_synthesis_node`` for the backward-compat shim.
     """
-    # Resolve system prompt with the runtime limit so the LLM knows the cap
-    _system_prompt = _SYNTHESIS_SYSTEM_PROMPT_TEMPLATE.format(
-        max_data_points=chart_max_data_points
-    )
-    structured_llm = synthesis_llm.with_structured_output(AnalyticsResponse)
 
-    log.info("synthesis_node_built", chart_max_data_points=chart_max_data_points)
+    def __init__(
+        self,
+        *,
+        llm,
+        prompts,
+        compaction,
+        chart_max_data_points: int,
+    ) -> None:
+        self._llm = llm
+        self._prompts = prompts
+        self._compaction = compaction
+        self._chart_max_data_points = chart_max_data_points
+        # Resolve system prompt with the runtime limit so the LLM knows the cap
+        self._system_prompt = _SYNTHESIS_SYSTEM_PROMPT_TEMPLATE.format(
+            max_data_points=chart_max_data_points
+        )
+        self._structured_llm = llm.with_structured_output(AnalyticsResponse)
+        log.info("synthesis_node_built", chart_max_data_points=chart_max_data_points)
 
-    async def synthesis_node(state: AnalyticsState) -> dict:
+    async def __call__(self, state: AnalyticsState, config=None) -> dict:
         raw_data = state.get("raw_data_context", {})
+        chart_max_data_points = self._chart_max_data_points
 
         # Apply compaction to conversation history if modifier is available
         messages = list(state["messages"])
-        if compaction_modifier is not None:
-            messages = compaction_modifier({"messages": messages})
+        if self._compaction is not None:
+            messages = self._compaction.apply(messages)
 
         user_messages = [m for m in messages if hasattr(m, "type") and m.type == "human"]
         last_query = user_messages[-1].content if user_messages else "Analyze the data"
@@ -146,7 +151,7 @@ def make_synthesis_node(
             )
 
         prompt_content = (
-            f"{_system_prompt}\n\n"
+            f"{self._system_prompt}\n\n"
             f"## User Query\n{last_query}\n\n"
             f"## Raw Data from MCP Servers\n```json\n{data_summary}\n```"
             f"{error_context}"
@@ -155,7 +160,7 @@ def make_synthesis_node(
         last_error: Optional[Exception] = None
         for attempt in range(1 + SYNTHESIS_MAX_RETRIES):
             try:
-                result = await structured_llm.ainvoke([HumanMessage(content=prompt_content)])
+                result = await self._structured_llm.ainvoke([HumanMessage(content=prompt_content)])
 
                 # Post-process: enforce chart_max_data_points on each component.
                 # This is a safety net — the LLM should respect the limit in the prompt,
@@ -225,4 +230,46 @@ def make_synthesis_node(
             "errors": [f"synthesis: {last_error}"],
         }
 
-    return synthesis_node
+
+def make_synthesis_node(
+    synthesis_llm,
+    prompts=None,
+    compaction_modifier: Optional[Callable] = None,
+    chart_max_data_points: int = MAX_CHART_DATA_POINTS,
+):
+    """Build the synthesis node. Backward-compat shim.
+
+    Args:
+        synthesis_llm:         LangChain ChatModel configured with complex-routing.
+        prompts:               Optional PromptLoader for template overrides.
+        compaction_modifier:   Optional callable to trim messages before LLM call.
+        chart_max_data_points: Maximum data points per chart component.  Passed via
+                               AgentConfig.chart_max_data_points so operators can tune
+                               it without a code change.  Defaults to MAX_CHART_DATA_POINTS (20).
+    """
+
+    class _LegacyCompactionAdapter:
+        """Adapts old-style compaction_modifier callable to CompactionModifier Protocol.
+
+        The old factory passed a callable that accepted {"messages": messages} and
+        returned a list. The new SynthesisNode expects .apply(messages) -> list.
+        """
+
+        def __init__(self, modifier):
+            self._modifier = modifier
+
+        def apply(self, messages):
+            return self._modifier({"messages": messages})
+
+    compaction = (
+        _LegacyCompactionAdapter(compaction_modifier)
+        if compaction_modifier is not None
+        else None
+    )
+
+    return SynthesisNode(
+        llm=synthesis_llm,
+        prompts=prompts,
+        compaction=compaction,
+        chart_max_data_points=chart_max_data_points,
+    )
