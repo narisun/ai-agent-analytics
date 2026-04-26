@@ -431,6 +431,35 @@ async def _build_tool_catalog(bridges: dict) -> str:
     return "\n\n".join(sections)
 
 
+def _format_tools_as_catalog(tools: list) -> str:
+    """Format a flat list of langchain tools into a tool-catalog string.
+
+    Used by IntentRouterNode which receives tools from an MCPToolsProvider
+    rather than raw bridge objects.
+    """
+    # Filter out session_id — it is auto-injected by the tool caller
+    AUTO_INJECTED = {"session_id"}
+    lines = []
+    for tool in tools:
+        try:
+            schema = tool.args_schema.model_json_schema() if tool.args_schema else {}
+        except Exception:
+            schema = {}
+        required = schema.get("required", [])
+        props = schema.get("properties", {})
+        param_parts = []
+        for pname, pinfo in props.items():
+            if pname in AUTO_INJECTED:
+                continue
+            ptype = pinfo.get("type", "string")
+            pdesc = pinfo.get("description", "")
+            req_marker = " (REQUIRED)" if pname in required else " (optional)"
+            param_parts.append(f"    - {pname} ({ptype}){req_marker}: {pdesc}")
+        params_str = "\n".join(param_parts) if param_parts else "    (no parameters)"
+        lines.append(f"- **{tool.name}**: {tool.description}\n  Parameters:\n{params_str}")
+    return "\n".join(lines)
+
+
 def _extract_entities_from_context(raw_context: dict) -> dict[str, list[str]]:
     """Extract unique named entities from previous MCP results.
 
@@ -501,20 +530,32 @@ def _extract_entities_from_context(raw_context: dict) -> dict[str, list[str]]:
     }
 
 
-def make_intent_router_node(router_llm, bridges: dict, prompts: PromptLoader = None,
-                            compaction_modifier: Optional[Callable] = None):
-    """Build the intent router node.
+class IntentRouterNode:
+    """Callable class wrapping the intent-routing LLM call.
 
-    Args:
-        router_llm: LangChain ChatModel configured with fast-routing.
-        bridges: Dict mapping MCP server names to MCPToolBridge instances.
-        prompts: Optional PromptLoader for template overrides.
-        compaction_modifier: Optional callable to trim messages before LLM call.
+    Constructor-injected with `llm`, `tools_provider` (MCPToolsProvider Protocol),
+    `prompts` (PromptLoader | None), and `compaction` (CompactionModifier Protocol).
+
+    Behavior preserved from the legacy factory function — see
+    make_intent_router_node below for the backward-compat shim.
     """
-    structured_llm = router_llm.with_structured_output(IntentResult)
-    _cached_prompt: list[str | None] = [None]  # mutable container for caching
 
-    async def intent_router(state: AnalyticsState) -> dict:
+    def __init__(
+        self,
+        *,
+        llm,
+        tools_provider,
+        prompts,
+        compaction,
+    ) -> None:
+        self._llm = llm
+        self._tools_provider = tools_provider
+        self._prompts = prompts
+        self._compaction = compaction
+        self._structured_llm = llm.with_structured_output(IntentResult)
+        self._cached_prompt: list[str | None] = [None]  # mutable container for caching
+
+    async def __call__(self, state: AnalyticsState, config=None) -> dict:
         # Migrate checkpointed state from older schema versions before any processing.
         # Returns {} on the common path (current version) — no overhead.
         migration_updates = migrate_state(state)
@@ -525,12 +566,22 @@ def make_intent_router_node(router_llm, bridges: dict, prompts: PromptLoader = N
         turn_count = state.get("turn_count", 0)
         has_data = bool(state.get("raw_data_context"))
 
+        # Extract user_ctx from LangGraph config if available
+        user_ctx = None
+        if config is not None:
+            user_ctx = (config or {}).get("configurable", {}).get("user_ctx")
+
         # Build system prompt with dynamic tool catalog (cached after first call)
-        if _cached_prompt[0] is None:
-            tool_catalog = await _build_tool_catalog(bridges)
-            _cached_prompt[0] = _ROUTER_SYSTEM_PROMPT_HEADER.format(tool_catalog=tool_catalog)
+        if self._cached_prompt[0] is None:
+            try:
+                tools = await self._tools_provider.get_langchain_tools(user_ctx)
+            except Exception as exc:
+                log.warning("tool_catalog_provider_error", error=str(exc))
+                tools = []
+            tool_catalog = _format_tools_as_catalog(tools)
+            self._cached_prompt[0] = _ROUTER_SYSTEM_PROMPT_HEADER.format(tool_catalog=tool_catalog)
             log.info("tool_catalog_built", length=len(tool_catalog))
-        system_content = _cached_prompt[0]
+        system_content = self._cached_prompt[0]
         if has_data:
             raw_context = state.get("raw_data_context") or {}
             available_keys = list(raw_context.keys())
@@ -597,11 +648,11 @@ def make_intent_router_node(router_llm, bridges: dict, prompts: PromptLoader = N
 
         # Apply compaction to keep messages within token budget
         messages = list(state["messages"])
-        if compaction_modifier is not None:
-            messages = compaction_modifier({"messages": messages})
+        if self._compaction is not None:
+            messages = self._compaction.apply(messages)
 
         try:
-            result = await structured_llm.ainvoke(
+            result = await self._structured_llm.ainvoke(
                 [SystemMessage(content=system_content)] + messages
             )
 
@@ -642,7 +693,61 @@ def make_intent_router_node(router_llm, bridges: dict, prompts: PromptLoader = N
                 "errors": [f"intent_router: {exc}"],
             }
 
-    return intent_router
+
+def make_intent_router_node(router_llm, bridges: dict, prompts: PromptLoader = None,
+                            compaction_modifier: Optional[Callable] = None):
+    """Deprecated shim — retained until graph.py migrates to GraphDependencies.
+
+    Wraps the bridges dict into an MCPToolsProvider adapter and returns an
+    IntentRouterNode instance. Existing tests/callers continue to work
+    unchanged because the returned object is callable with the same
+    (state, config) signature.
+
+    Args:
+        router_llm: LangChain ChatModel configured with fast-routing.
+        bridges: Dict mapping MCP server names to MCPToolBridge instances.
+        prompts: Optional PromptLoader for template overrides.
+        compaction_modifier: Optional callable to trim messages before LLM call.
+    """
+
+    class _BridgeToolsProvider:
+        async def get_langchain_tools(self, user_ctx=None):
+            tools: list = []
+            for bridge in (bridges or {}).values():
+                if getattr(bridge, "is_connected", False):
+                    bridge_tools = (
+                        await bridge.get_langchain_tools(user_ctx)
+                        if user_ctx
+                        else await bridge.get_langchain_tools()
+                    )
+                    tools.extend(bridge_tools)
+            return tools
+
+    class _LegacyCompactionAdapter:
+        """Adapts an old-style compaction_modifier callable to the CompactionModifier Protocol.
+
+        The old factory passed a callable that accepted {"messages": messages} and
+        returned a list. The new IntentRouterNode expects .apply(messages) -> list.
+        """
+
+        def __init__(self, modifier):
+            self._modifier = modifier
+
+        def apply(self, messages):
+            return self._modifier({"messages": messages})
+
+    compaction = (
+        _LegacyCompactionAdapter(compaction_modifier)
+        if compaction_modifier is not None
+        else None
+    )
+
+    return IntentRouterNode(
+        llm=router_llm,
+        tools_provider=_BridgeToolsProvider(),
+        prompts=prompts,
+        compaction=compaction,
+    )
 
 
 _VALID_INTENTS = frozenset({"data_query", "follow_up", "clarification"})
