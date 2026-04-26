@@ -27,7 +27,13 @@ class QueryPlanStep(BaseModel):
     )
     description: str = Field(
         default="",
-        description="Human-readable description of what this step does (shown in trace panel)",
+        description=(
+            "One-sentence label of what this step retrieves, in plain English — "
+            "shown in the agent trace panel. Examples: "
+            "'Aggregate completed payments by transaction type for the past quarter'; "
+            "'Look up CRM pipeline opportunities for Acme Corp'. "
+            "Avoid empty strings and tool-name-only labels — they make traces useless."
+        ),
     )
 
 

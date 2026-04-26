@@ -1,18 +1,18 @@
 """Build a UserContext from request headers.
 
-Header contract (matches the dashboard's existing convention; see
-src/app.py:386-387 in the pre-Phase-7 inline endpoint):
+Header contract:
 
-    X-User-Email     required — used as UserContext.user_id
-    X-User-Role      optional — used as UserContext.tenant_id; defaults to "default"
-    Authorization    optional — Bearer token mapped to UserContext.auth_token
+    X-User-Email   required — UserContext.user_id
+    X-User-Role    optional — UserContext.tenant_id; defaults to "default"
 
-Phase 9 will replace the role-as-tenant mapping with a real tenant
-claim from a verified JWT. Until then this preserves the dashboard's
-existing header contract while plumbing user identity through the
-new SoC/DI structure.
+UserContext.auth_token is an HMAC-signed AgentContext header value
+minted server-side here. Downstream MCP servers verify the HMAC with
+CONTEXT_HMAC_SECRET — the LLM cannot forge it, and the dashboard does
+not need to know the secret.
 """
 from __future__ import annotations
+
+from platform_sdk import AgentContext
 
 from ..domain.errors import AuthError
 from ..domain.types import UserContext
@@ -33,10 +33,16 @@ def _user_ctx_from(request) -> UserContext:
 
     role = headers.get("x-user-role") or "default"
 
-    auth = headers.get("authorization") or ""
-    if auth.lower().startswith("bearer "):
-        token = auth[len("bearer "):].strip()
-    else:
-        token = ""
+    per_request_ctx = AgentContext(
+        rm_id=email,
+        rm_name=email.split("@")[0] if "@" in email else email,
+        role="manager",
+        team_id="analytics",
+        assigned_account_ids=(),
+        compliance_clearance=("standard", "aml_view"),
+        user_email=email,
+        user_role=role,
+    )
+    token = per_request_ctx.to_header_value()
 
     return UserContext(user_id=email, tenant_id=role, auth_token=token)

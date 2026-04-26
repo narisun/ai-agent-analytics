@@ -11,6 +11,7 @@ Intent types:
 """
 import asyncio
 import json
+import time
 from typing import Callable, Optional
 
 from langchain_core.messages import SystemMessage
@@ -23,6 +24,13 @@ from ..state import AnalyticsState, migrate_state
 log = get_logger(__name__)
 
 VALID_INTENTS = {"data_query", "follow_up", "clarification"}
+
+# Refresh the cached system prompt every N seconds so a bridge reconnect with a
+# different toolset surfaces without an agent restart. Keep this short enough
+# that an operator-driven config change becomes visible within one coffee break,
+# but long enough that the steady-state path doesn't pay an MCP list_tools
+# round-trip on every turn.
+_PROMPT_CACHE_TTL_SECONDS = 300
 
 _ROUTER_SYSTEM_PROMPT_HEADER = """You are an intent classifier for an enterprise analytics platform.
 
@@ -113,20 +121,18 @@ RULE 5 — MULTI-CLIENT / RELATIONSHIP QUERIES → execute_read_query with ILIKE
   ✅ WHERE ("PayorName" ILIKE '%Google%' AND "PayeeName" ILIKE '%Costco%')
         OR ("PayorName" ILIKE '%Costco%' AND "PayeeName" ILIKE '%Google%')
 
-RULE 6 — BANK-SPECIFIC QUERIES → execute_read_query on PayorBank/PayeeBank:
-  When the user asks about a BANK's role in transactions (e.g. "BMO", "Chase", "Wells Fargo",
-  "Citibank", any entity with "Bank", "Bancorp", "Financial", "Trust" in the name), use
-  execute_read_query filtering on "PayorBank" OR "PayeeBank" columns. Do NOT use
-  get_payment_summary — that tool looks up CLIENT/PARTY names in dim_party, not bank names
-  in dim_bank. Banks appear in "PayorBank"/"PayeeBank", clients appear in "PayorName"/"PayeeName".
-
-  Key signals that the user means a BANK (not a client):
-    - The name contains "Bank", "Bancorp", "Financial", "N.A.", "Trust", "Credit Union"
-    - The name matches a bank listed in the "Entities from previous results" section below
-    - The user says "processed by", "cleared through", "volume at [bank]", "transactions through"
-
-  ✅ execute_read_query with WHERE ("PayorBank" ILIKE '%BMO%' OR "PayeeBank" ILIKE '%BMO%')
-  ❌ get_payment_summary with client_name="BMO Harris Bank"  ← WRONG, BMO is a bank not a party
+RULE 6 — BANK-PERSPECTIVE QUERIES → get_bank_payment_summary:
+  When the user asks about a *bank* (financial institution facilitating payments)
+  use get_bank_payment_summary on payments-mcp. Banks are different from parties:
+    • Parties = corporate counterparties (clients) → get_payment_summary.
+    • Banks   = financial institutions → get_bank_payment_summary.
+  Bank-shaped names typically contain "Bank", "Bancorp", "Financial", "Trust",
+  "N.A.", or "Credit Union", or appear in the "Entities from previous results"
+  bank list. Both tools support fuzzy matching ("BMO" → "BMO Harris Bank (US)").
+  ✅ get_bank_payment_summary with bank_name="BMO"
+  ❌ get_payment_summary with client_name="BMO Harris Bank"  (BMO is a bank, not a party)
+  Drop into raw execute_read_query only when you need fields the tool doesn't return
+  (e.g. specific transaction-level rows, joins to non-payments tables).
 
 ## SQL RULES (only for execute_read_query on data-mcp)
   1. Always double-quote table names in salesforce schema: salesforce."Opportunity"
@@ -157,7 +163,8 @@ RULE 6 — BANK-SPECIFIC QUERIES → execute_read_query on PayorBank/PayeeBank:
      values (see schema_context above for the live list). Filter directly on
      "TransactionType" for the rail, and JOIN dim_product when you need product
      metadata: ON fp."TransactionType" = dp."PaymentRail" — no value translation
-     is required.
+     is required. The OLD "RTP ↔ RTP Credit" / "Fedwire ↔ Wire Transfer" mapping
+     is obsolete; ignore it.
 
 ## EXAMPLES — query_plan with parameters (FOLLOW THIS FORMAT)
 
@@ -233,15 +240,11 @@ User: "Which banks processed the highest inbound payment volume last quarter?"
   - tool_name: "execute_read_query", mcp_server: "data-mcp", parameters: {{"query": "SELECT \"PayeeBank\", SUM(\"Amount\") AS total_inbound_volume FROM bankdw.fact_payments WHERE \"TransactionType\" IN ('ACH Credit', 'Wire Transfer', 'RTP Credit') AND \"Status\" = 'Completed' AND \"TransactionDate\" >= date_trunc('quarter', CURRENT_DATE) - interval '3 months' AND \"TransactionDate\" < date_trunc('quarter', CURRENT_DATE) GROUP BY \"PayeeBank\" ORDER BY total_inbound_volume DESC LIMIT 20"}}
   NOTE: Use interval '3 months' for a quarter — NOT interval '1 quarter' (invalid PostgreSQL)
 
-User: "How does the payment product breakdown look for BMO?"
-  (context: previous results showed "BMO Harris Bank (US)" in a bank ranking chart)
+User: "What's the payment volume at BMO?" / "How is BMO trending?"
 → intent: data_query
 → query_plan:
-  - tool_name: "execute_read_query", mcp_server: "data-mcp", parameters: {{"query": "SELECT dp.\"ProductName\", dp.\"ProductCategory\", COUNT(*) AS txn_count, SUM(fp.\"Amount\") AS total_amount FROM bankdw.fact_payments fp JOIN bankdw.dim_product dp ON fp.\"TransactionType\" = dp.\"PaymentRail\" WHERE (fp.\"PayorBank\" ILIKE '%BMO%' OR fp.\"PayeeBank\" ILIKE '%BMO%') AND fp.\"Status\" = 'Completed' GROUP BY dp.\"ProductName\", dp.\"ProductCategory\" ORDER BY total_amount DESC"}}
-  NOTES:
-  - "BMO" was resolved to "BMO Harris Bank (US)" using the entity list from previous results
-  - BMO is a BANK → filter on PayorBank/PayeeBank, NOT get_payment_summary (which is for clients)
-  - Join dim_product via TransactionType = PaymentRail to get product breakdown
+  - tool_name: "get_bank_payment_summary", mcp_server: "payments-mcp", parameters: {{"bank_name": "BMO"}}
+  (Bank perspective — fuzzy match resolves "BMO" to "BMO Harris Bank (US)".)
 
 User: "Show me transactions between Google and Costco"
 → intent: data_query
@@ -292,7 +295,7 @@ async def _build_tool_catalog(bridges: dict) -> str:
                 required = schema.get("required", [])
                 props = schema.get("properties", {})
                 # Filter out session_id — it is auto-injected by the tool caller
-                AUTO_INJECTED = {"session_id"}
+                AUTO_INJECTED = {"session_id", "auth_context"}
                 param_parts = []
                 for pname, pinfo in props.items():
                     if pname in AUTO_INJECTED:
@@ -317,7 +320,7 @@ def _format_tools_as_catalog(tools: list) -> str:
     rather than raw bridge objects.
     """
     # Filter out session_id — it is auto-injected by the tool caller
-    AUTO_INJECTED = {"session_id"}
+    AUTO_INJECTED = {"session_id", "auth_context"}
     lines = []
     for tool in tools:
         try:
@@ -435,6 +438,7 @@ class IntentRouterNode:
         self._schema_context = schema_context
         self._structured_llm = llm.with_structured_output(IntentResult)
         self._cached_prompt: str | None = None
+        self._cached_at: float = 0.0
 
     async def __call__(self, state: AnalyticsState, config=None) -> dict:
         # Migrate checkpointed state from older schema versions before any processing.
@@ -452,8 +456,11 @@ class IntentRouterNode:
         if config is not None:
             user_ctx = (config or {}).get("configurable", {}).get("user_ctx")
 
-        # Build system prompt with dynamic tool catalog (cached after first call)
-        if self._cached_prompt is None:
+        # Build system prompt with dynamic tool catalog. Cache hit within TTL
+        # avoids an MCP list_tools round-trip on every turn; expiry lets a
+        # bridge reconnect with new tools surface without an agent restart.
+        now = time.monotonic()
+        if self._cached_prompt is None or (now - self._cached_at) > _PROMPT_CACHE_TTL_SECONDS:
             try:
                 tools = await asyncio.wait_for(
                     self._tools_provider.get_langchain_tools(user_ctx),
@@ -479,10 +486,12 @@ class IntentRouterNode:
                 tool_catalog=tool_catalog,
                 schema_context=schema_context,
             )
+            self._cached_at = now
             log.info(
                 "router_prompt_built",
                 tool_catalog_chars=len(tool_catalog),
                 schema_context_chars=len(schema_context),
+                ttl_seconds=_PROMPT_CACHE_TTL_SECONDS,
             )
         system_content = self._cached_prompt
         if has_data:
@@ -575,6 +584,12 @@ class IntentRouterNode:
                 }
 
             plan_dump = [s.model_dump() for s in result.query_plan]
+            for step in plan_dump:
+                if not (step.get("description") or "").strip():
+                    step["description"] = (
+                        f"{step.get('tool_name', 'tool')} on "
+                        f"{step.get('mcp_server', 'unknown')}"
+                    )
             log.info(
                 "intent_classified",
                 intent=result.intent,

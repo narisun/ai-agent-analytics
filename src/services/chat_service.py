@@ -15,7 +15,7 @@ from __future__ import annotations
 import uuid
 from typing import Any, AsyncIterator, Callable, Optional
 
-from platform_sdk import AgentConfig, get_logger
+from platform_sdk import AgentConfig, get_langfuse_callback_handler, get_logger
 
 from ..domain.errors import AnalyticsError
 from ..domain.types import ChatRequest, UserContext
@@ -64,7 +64,7 @@ class ChatService:
         across the streaming boundary.
         """
         encoder = self._encoder_factory()
-        session_id = req.conversation_id or uuid.uuid4().hex
+        session_id = req.conversation_id or str(uuid.uuid4())
         thread_id = make_thread_id(self._user_ctx.user_id, session_id)
 
         captured_narrative = ""
@@ -84,13 +84,20 @@ class ChatService:
                 graph_messages = list(req.history) + [
                     {"role": "user", "content": req.message}
                 ]
-                run_config = {
+                run_config: dict[str, Any] = {
                     "configurable": {
                         "user_ctx": self._user_ctx,
                         "thread_id": thread_id,
                         "session_id": session_id,
                     }
                 }
+                lf_handler = get_langfuse_callback_handler(
+                    session_id=session_id,
+                    user_id=self._user_ctx.user_id,
+                    trace_name="analytics-agent.chat",
+                )
+                if lf_handler is not None:
+                    run_config["callbacks"] = [lf_handler]
 
                 async for event in self._graph.astream_events(
                     {"messages": graph_messages, "session_id": session_id},
