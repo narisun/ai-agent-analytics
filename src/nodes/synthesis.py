@@ -42,12 +42,31 @@ Pick a component ONLY when it adds information the narrative cannot already
 convey. A short list (2-5 items) often reads better as a sentence in the
 narrative — do not manufacture a component for the sake of having one.
 
-- **BarChart**: Categorical comparison with a real numeric measure (revenue
-  by region, counts by department). Each row needs a `category` AND a
-  meaningful `value`. NEVER use BarChart with placeholder values like
-  `value: 1` for every row — that's a list, not a chart.
+- **BarChart**: Categorical comparison with a real numeric measure where
+  the categories are NON-TEMPORAL (revenue by region, counts by department,
+  top accounts by volume). Each row needs a `category` AND a meaningful
+  `value`. NEVER use BarChart with placeholder values like `value: 1` for
+  every row — that's a list, not a chart. NEVER use BarChart when the X-axis
+  is a date or time period — use LineChart instead.
 
-- **LineChart / AreaChart**: Time-series trends.
+- **LineChart**: Time-series. Use this whenever the X-axis is a date,
+  month, week, day, or any other time period — even if there are only a
+  few points. Strong signals to pick LineChart:
+    • The user query mentions a time window: "last 30 days", "last quarter",
+      "monthly", "weekly", "daily", "year-over-year", "MoM", "YoY".
+    • The user asks for a "trend", "trajectory", "evolution", "trending",
+      "over time", or "history".
+    • The data has a column whose name contains `date`, `_at`, `_dt`,
+      `month`, `week`, `day`, `period`, or `quarter`.
+    • Categories on the X-axis are date strings ('2026-01-01') or
+      YYYYMMDD integers (20260101).
+  For LineChart use `category` for the date and `value` for the measure.
+  Multiple measures (count + amount) → emit two LineCharts side by side,
+  one per measure, NOT one BarChart of dates.
+
+- **AreaChart**: Cumulative or stacked time-series (running pipeline,
+  cumulative volume). Same time-axis rules as LineChart. Use when the
+  emphasis is on "amount accumulated to date" rather than "rate at each point".
 
 - **PieChart**: Part-of-whole. Slices must sum to a meaningful whole.
 
@@ -86,7 +105,10 @@ narrative — do not manufacture a component for the sake of having one.
   narrative; consider KPICard with the count, OR omit components entirely.
   Do NOT invent a chart of `value: 1`s.
 - Question is "how much / how many?" → KPICard or BarChart with real measures.
-- Question is "trend over time" → LineChart.
+- Question mentions a time window or asks for a trend/history/evolution
+  ("last 30 days", "monthly volume", "wire trends", "daily count", "MoM",
+  "YoY") → **LineChart**, never BarChart. The X-axis is the date/period;
+  the Y-axis is the measure.
 - Question returns a multi-attribute roster (top N accounts with revenue,
   rating, segment …) → DataTable with semantic column names.
 
@@ -96,8 +118,9 @@ narrative — do not manufacture a component for the sake of having one.
    Empty `components: []` is a perfectly valid response when the narrative
    is self-sufficient.
 2. Use KPICard for headline numbers with trends (e.g., total revenue up 12%).
-3. Use BarChart for comparing categories with a real numeric measure.
-   Use LineChart for time-series data.
+3. Picking BarChart vs LineChart: if the X-axis is time (any date / week /
+   month / quarter / day-of-week / "last N days" series), it MUST be a
+   LineChart. BarChart is for non-temporal categorical comparison.
 4. For the `source` field, use the MCP server name that produced the data.
 5. Set confidence_score based on data completeness (1.0 = all data present, lower if partial).
 6. Use format_hint to tell the frontend how to format values:
