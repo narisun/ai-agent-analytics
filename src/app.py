@@ -34,6 +34,7 @@ from platform_sdk.security import make_api_key_verifier
 from .graph import build_analytics_graph
 from .middleware.rate_limiter import make_rate_limiter
 from .persistence import PostgresConversationStore, MemoryConversationStore
+from .thread_id import make_thread_id
 
 configure_logging()
 log = get_logger(__name__)
@@ -453,7 +454,9 @@ async def chat_analytics(
                     "session_id": session_id,
                 },
                 config={
-                    "configurable": {"thread_id": session_id},
+                    "configurable": {
+                        "thread_id": make_thread_id(user_email, session_id),
+                    },
                 },
                 version="v2",
             ):
