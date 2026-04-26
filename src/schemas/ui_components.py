@@ -14,7 +14,7 @@ Supported component types:
   - DataTable: Tabular data display (top accounts, transaction details)
 """
 from typing import Literal, Optional, Union
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class ChartMetadata(BaseModel):
@@ -72,8 +72,7 @@ class KPIDataPoint(BaseModel):
 
 class TableRow(BaseModel):
     """Single row in a DataTable component. Keys are column names."""
-    class Config:
-        extra = "allow"
+    model_config = ConfigDict(extra="allow")
 
 
 class UIComponent(BaseModel):
