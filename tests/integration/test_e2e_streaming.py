@@ -29,6 +29,8 @@ from src.app import app
 from src.schemas.intent import IntentResult, QueryPlanStep
 from src.schemas.ui_components import AnalyticsResponse, UIComponent, ChartMetadata, ChartDataPoint
 
+pytestmark = pytest.mark.integration
+
 
 class DataStreamParser:
     """Parser for Data Stream Protocol format responses.
