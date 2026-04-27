@@ -121,6 +121,12 @@ RULE 5 — MULTI-CLIENT / RELATIONSHIP QUERIES → execute_read_query with ILIKE
   ✅ WHERE ("PayorName" ILIKE '%Google%' AND "PayeeName" ILIKE '%Costco%')
         OR ("PayorName" ILIKE '%Costco%' AND "PayeeName" ILIKE '%Google%')
 
+RULE 5b — TIME-SERIES / TREND → execute_read_query (single step, date_trunc):
+  Trend / "over time" / "last N days" / "monthly" / "weekly" / "MoM" / "YoY"
+  questions need date-binned rows. The *_summary tools return single-window
+  snapshots and cannot answer them. Use ONE execute_read_query step with
+  date_trunc on TransactionDate. Granularity: ≤30d→day, ≤6mo→week, >6mo→month.
+
 RULE 6 — BANK-PERSPECTIVE QUERIES → get_bank_payment_summary:
   When the user asks about a *bank* (financial institution facilitating payments)
   use get_bank_payment_summary on payments-mcp. Banks are different from parties:

@@ -9,6 +9,7 @@ Uses complex-routing (GPT-4o) for high-quality narrative generation
 and structured output to guarantee valid UI component schemas.
 """
 import json
+import re
 from datetime import datetime, timezone
 from typing import Callable, Optional
 
@@ -27,6 +28,29 @@ MAX_CHART_DATA_POINTS = 20
 
 # Number of retries when structured output fails (JSON parse errors)
 SYNTHESIS_MAX_RETRIES = 2
+
+# Heuristic: a category string looks like a date / time period when it matches
+# one of these patterns. Used to backstop the LLM's chart-type choice — a
+# LineChart/AreaChart with non-date categories is almost always a mistake
+# (the user asked for a trend but the data is an aggregate snapshot).
+_DATE_LIKE_PATTERNS = (
+    re.compile(r"^\d{4}-\d{2}-\d{2}"),     # 2026-01-15, 2026-01-15T... (ISO date / datetime)
+    re.compile(r"^\d{4}-\d{2}$"),           # 2026-01 (year-month)
+    re.compile(r"^\d{4}-W\d{2}$"),          # 2026-W03 (ISO week)
+    re.compile(r"^\d{4}-Q[1-4]$"),          # 2026-Q1
+    re.compile(r"^\d{4}/\d{2}/\d{2}"),      # 2026/01/15
+    re.compile(r"^\d{8}$"),                 # YYYYMMDD integer rendered as string
+)
+
+
+def _category_is_date_like(value) -> bool:
+    """True when a chart-data-point category looks like a date or time period."""
+    if isinstance(value, int):
+        # YYYYMMDD integers in the typical range
+        return 19000101 <= value <= 21000101
+    if not isinstance(value, str):
+        return False
+    return any(p.match(value) for p in _DATE_LIKE_PATTERNS)
 
 # Template — {max_data_points} is resolved inside make_synthesis_node() using
 # the runtime config value so operators can tune it without code changes.
@@ -50,19 +74,22 @@ narrative — do not manufacture a component for the sake of having one.
   is a date or time period — use LineChart instead.
 
 - **LineChart**: Time-series. Use this whenever the X-axis is a date,
-  month, week, day, or any other time period — even if there are only a
-  few points. Strong signals to pick LineChart:
-    • The user query mentions a time window: "last 30 days", "last quarter",
-      "monthly", "weekly", "daily", "year-over-year", "MoM", "YoY".
-    • The user asks for a "trend", "trajectory", "evolution", "trending",
-      "over time", or "history".
-    • The data has a column whose name contains `date`, `_at`, `_dt`,
-      `month`, `week`, `day`, `period`, or `quarter`.
-    • Categories on the X-axis are date strings ('2026-01-01') or
-      YYYYMMDD integers (20260101).
-  For LineChart use `category` for the date and `value` for the measure.
-  Multiple measures (count + amount) → emit two LineCharts side by side,
-  one per measure, NOT one BarChart of dates.
+  month, week, day, or any other time period.
+  HARD VALIDATION RULE — before emitting LineChart, look at the data you
+  actually received. The `category` field on every point MUST be a date
+  string ('2026-01-01', '2026-01', '2026-W03'), a YYYYMMDD integer, or
+  another time-period label. If `category` values are non-date strings
+  like 'Domestic Wire', 'ACH Credit', 'BMO Harris Bank', that data is
+  NOT time-series — even if the user's QUESTION asked for a trend.
+  In that case:
+    • Pick BarChart instead (categorical comparison), AND
+    • Note in the narrative that the available data is an aggregated
+      snapshot over the window, not a per-day/week/month series — so
+      the user can rephrase or you can ask the agent to query a
+      date-bucketed view.
+  For a real LineChart use `category` for the date and `value` for the
+  measure. Multiple measures (count + amount) → emit two LineCharts
+  side by side, one per measure, NOT one BarChart of dates.
 
 - **AreaChart**: Cumulative or stacked time-series (running pipeline,
   cumulative volume). Same time-axis rules as LineChart. Use when the
@@ -242,6 +269,34 @@ class SynthesisNode:
                     SystemMessage(content=self._system_prompt),
                     HumanMessage(content=data_message),
                 ])
+
+                # Post-process: backstop the LLM's chart-type choice. If it
+                # picked LineChart/AreaChart but the categories are NOT date-
+                # like (e.g. 'Domestic Wire', 'BMO Harris Bank'), the data is
+                # an aggregated snapshot, not a real time-series. Plotting it
+                # as a line implies a temporal axis that doesn't exist —
+                # silently coerce to BarChart so the picture matches the data.
+                # comp.data contains either Pydantic ChartDataPoint instances
+                # or raw dicts (DataTable case); handle both.
+                def _category_of(d):
+                    if isinstance(d, dict):
+                        return d.get("category")
+                    return getattr(d, "category", None)
+
+                for comp in result.components:
+                    if comp.component_type in ("LineChart", "AreaChart"):
+                        categories = [_category_of(d) for d in comp.data]
+                        if categories and not any(
+                            _category_is_date_like(c) for c in categories
+                        ):
+                            log.warning(
+                                "linechart_coerced_to_barchart",
+                                original_type=comp.component_type,
+                                sample_categories=categories[:3],
+                                reason="categories are not date-like — data is "
+                                       "a snapshot aggregate, not a time-series",
+                            )
+                            comp.component_type = "BarChart"
 
                 # Post-process: enforce chart_max_data_points on each component.
                 # This is a safety net — the LLM should respect the limit in the prompt,
