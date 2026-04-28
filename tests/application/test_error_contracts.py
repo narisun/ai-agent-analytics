@@ -4,10 +4,11 @@ A pre-stream failure (auth, body validation) must surface as an HTTP
 4xx. A mid-stream failure (after streaming has started) must yield an
 encoded error event in a 200 stream — never a 500.
 """
+
 import os
+
 os.environ.setdefault("INTERNAL_API_KEY", "test-internal-api-key")
 
-from contextlib import contextmanager  # noqa: E402
 from unittest.mock import AsyncMock, MagicMock  # noqa: E402
 
 from fastapi.testclient import TestClient  # noqa: E402
@@ -28,6 +29,7 @@ def _graph_that_raises_midstream():
     async def _stream(*a, **k):
         yield {"event": "on_chain_start", "name": "intent_router"}
         raise ToolsUnavailable("all MCP bridges unreachable")
+
     g.astream_events = _stream
     return g
 

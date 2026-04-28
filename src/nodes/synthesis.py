@@ -8,15 +8,15 @@ Takes raw data from MCP tool calls and produces:
 Uses complex-routing (GPT-4o) for high-quality narrative generation
 and structured output to guarantee valid UI component schemas.
 """
+
 import json
 import re
-from datetime import datetime, timezone
 from typing import Callable, Optional
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
 from platform_sdk import get_logger
-from ..schemas.ui_components import AnalyticsResponse, UIComponent
+from ..schemas.ui_components import AnalyticsResponse
 from ..state import AnalyticsState
 
 log = get_logger(__name__)
@@ -34,12 +34,12 @@ SYNTHESIS_MAX_RETRIES = 2
 # LineChart/AreaChart with non-date categories is almost always a mistake
 # (the user asked for a trend but the data is an aggregate snapshot).
 _DATE_LIKE_PATTERNS = (
-    re.compile(r"^\d{4}-\d{2}-\d{2}"),     # 2026-01-15, 2026-01-15T... (ISO date / datetime)
-    re.compile(r"^\d{4}-\d{2}$"),           # 2026-01 (year-month)
-    re.compile(r"^\d{4}-W\d{2}$"),          # 2026-W03 (ISO week)
-    re.compile(r"^\d{4}-Q[1-4]$"),          # 2026-Q1
-    re.compile(r"^\d{4}/\d{2}/\d{2}"),      # 2026/01/15
-    re.compile(r"^\d{8}$"),                 # YYYYMMDD integer rendered as string
+    re.compile(r"^\d{4}-\d{2}-\d{2}"),  # 2026-01-15, 2026-01-15T... (ISO date / datetime)
+    re.compile(r"^\d{4}-\d{2}$"),  # 2026-01 (year-month)
+    re.compile(r"^\d{4}-W\d{2}$"),  # 2026-W03 (ISO week)
+    re.compile(r"^\d{4}-Q[1-4]$"),  # 2026-Q1
+    re.compile(r"^\d{4}/\d{2}/\d{2}"),  # 2026/01/15
+    re.compile(r"^\d{8}$"),  # YYYYMMDD integer rendered as string
 )
 
 
@@ -51,6 +51,7 @@ def _category_is_date_like(value) -> bool:
     if not isinstance(value, str):
         return False
     return any(p.match(value) for p in _DATE_LIKE_PATTERNS)
+
 
 # Template — {max_data_points} is resolved inside make_synthesis_node() using
 # the runtime config value so operators can tune it without code changes.
@@ -248,9 +249,7 @@ class SynthesisNode:
         errors = state.get("errors", [])
         error_block = ""
         if errors:
-            error_block = (
-                f"\n<errors>\n{json.dumps(errors, default=str)}\n</errors>"
-            )
+            error_block = f"\n<errors>\n{json.dumps(errors, default=str)}\n</errors>"
 
         # Untrusted data lives in a HumanMessage so a tool result containing
         # injection attempts (e.g. 'ignore previous instructions') can't impersonate
@@ -265,10 +264,12 @@ class SynthesisNode:
         last_error: Optional[Exception] = None
         for attempt in range(1 + SYNTHESIS_MAX_RETRIES):
             try:
-                result = await self._structured_llm.ainvoke([
-                    SystemMessage(content=self._system_prompt),
-                    HumanMessage(content=data_message),
-                ])
+                result = await self._structured_llm.ainvoke(
+                    [
+                        SystemMessage(content=self._system_prompt),
+                        HumanMessage(content=data_message),
+                    ]
+                )
 
                 # Post-process: backstop the LLM's chart-type choice. If it
                 # picked LineChart/AreaChart but the categories are NOT date-
@@ -286,15 +287,13 @@ class SynthesisNode:
                 for comp in result.components:
                     if comp.component_type in ("LineChart", "AreaChart"):
                         categories = [_category_of(d) for d in comp.data]
-                        if categories and not any(
-                            _category_is_date_like(c) for c in categories
-                        ):
+                        if categories and not any(_category_is_date_like(c) for c in categories):
                             log.warning(
                                 "linechart_coerced_to_barchart",
                                 original_type=comp.component_type,
                                 sample_categories=categories[:3],
                                 reason="categories are not date-like — data is "
-                                       "a snapshot aggregate, not a time-series",
+                                "a snapshot aggregate, not a time-series",
                             )
                             comp.component_type = "BarChart"
 
@@ -398,9 +397,7 @@ def make_synthesis_node(
             return self._modifier({"messages": messages})
 
     compaction = (
-        _LegacyCompactionAdapter(compaction_modifier)
-        if compaction_modifier is not None
-        else None
+        _LegacyCompactionAdapter(compaction_modifier) if compaction_modifier is not None else None
     )
 
     return SynthesisNode(

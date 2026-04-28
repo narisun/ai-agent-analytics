@@ -1,11 +1,11 @@
 """Application-tier tests for POST /api/v1/analytics/chat."""
+
 import os
+
 os.environ.setdefault("INTERNAL_API_KEY", "test-internal-api-key")
 
-from contextlib import contextmanager  # noqa: E402
 from unittest.mock import AsyncMock, MagicMock  # noqa: E402
 
-import pytest  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 
 from src.app import create_app  # noqa: E402
@@ -23,6 +23,7 @@ def _stub_graph():
     async def _astream(*args, **kwargs):
         return
         yield  # unreachable
+
     g.astream_events = _astream
     return g
 

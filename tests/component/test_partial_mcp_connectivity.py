@@ -13,9 +13,9 @@ Layer 1 is testable as a small component test; layer 2 requires a
 running event-loop assertion which is exercised indirectly via the
 existing application-tier tests.
 """
+
 from unittest.mock import AsyncMock, MagicMock
 
-import pytest
 
 # _MCPBridgeToolsProvider is private to graph.py; access via module path.
 from src.graph import _MCPBridgeToolsProvider

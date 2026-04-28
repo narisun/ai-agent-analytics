@@ -1,10 +1,11 @@
 """Application-tier tests for /api/v1/conversations CRUD."""
+
 import os
+
 os.environ.setdefault("INTERNAL_API_KEY", "test-internal-api-key")
 
 from unittest.mock import AsyncMock  # noqa: E402
 
-import pytest  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 
 from src.app import create_app  # noqa: E402

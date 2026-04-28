@@ -3,9 +3,9 @@
 Verifies the wire-format port preserves the byte-level contract of the
 pre-Phase-7 inline data_stream_generator in src/app.py.
 """
+
 import json
 
-import pytest
 
 from src.ports import StreamEncoder
 from src.streaming.data_stream_encoder import DataStreamEncoder
@@ -105,10 +105,12 @@ def test_on_chat_model_stream_routes_to_reasoning_in_reasoning_node():
 
     # Stream a token while intent_router is current.
     fake_chunk = type("C", (), {"content": "thinking"})()
-    out = enc.encode_event({
-        "event": "on_chat_model_stream",
-        "data": {"chunk": fake_chunk},
-    })
+    out = enc.encode_event(
+        {
+            "event": "on_chat_model_stream",
+            "data": {"chunk": fake_chunk},
+        }
+    )
     assert out.startswith(b"g:"), f"Expected reasoning frame, got {out!r}"
 
 
@@ -117,10 +119,12 @@ def test_on_chat_model_stream_routes_to_text_in_synthesis():
     enc.encode_event({"event": "on_chain_start", "name": "synthesis"})
 
     fake_chunk = type("C", (), {"content": "the "})()
-    out = enc.encode_event({
-        "event": "on_chat_model_stream",
-        "data": {"chunk": fake_chunk},
-    })
+    out = enc.encode_event(
+        {
+            "event": "on_chat_model_stream",
+            "data": {"chunk": fake_chunk},
+        }
+    )
     # Synthesis tokens go to text (0:) and mark synthesis_streamed=True.
     assert out.startswith(b"0:")
 
@@ -134,11 +138,13 @@ def test_on_chain_end_synthesis_skips_narrative_after_streaming():
 
     # Synthesis ends; narrative should NOT be re-emitted as a 0: frame
     # (already streamed token by token).
-    end_out = enc.encode_event({
-        "event": "on_chain_end",
-        "name": "synthesis",
-        "data": {"output": {"narrative": "the answer", "ui_components": []}},
-    })
+    end_out = enc.encode_event(
+        {
+            "event": "on_chain_end",
+            "name": "synthesis",
+            "data": {"output": {"narrative": "the answer", "ui_components": []}},
+        }
+    )
     text = end_out.decode()
     # No 0: frame for the duplicated narrative.
     assert "0:" not in text

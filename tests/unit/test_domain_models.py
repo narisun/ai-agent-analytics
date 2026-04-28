@@ -1,11 +1,11 @@
 """Unit tests for domain pydantic models."""
+
 import pytest
 from pydantic import ValidationError
 
 from src.domain.types import (
     ChatRequest,
     ChatResponse,
-    Conversation,
     ConversationSummary,
 )
 
@@ -31,7 +31,9 @@ class TestChatRequest:
 
 class TestConversation:
     def test_summary_has_title_and_id(self):
-        s = ConversationSummary(conversation_id="c1", title="Hello", updated_at="2026-04-16T00:00:00Z")
+        s = ConversationSummary(
+            conversation_id="c1", title="Hello", updated_at="2026-04-16T00:00:00Z"
+        )
         assert s.conversation_id == "c1"
 
 

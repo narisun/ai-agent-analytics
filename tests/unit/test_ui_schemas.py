@@ -1,16 +1,17 @@
 """Unit tests for UI component Pydantic schemas."""
+
 import pytest
 from src.schemas.ui_components import (
     AnalyticsResponse,
     ChartDataPoint,
     ChartMetadata,
-    KPIDataPoint,
     UIComponent,
 )
 from src.schemas.intent import IntentResult, QueryPlanStep
 
 
 # ── ChartMetadata ──────────────────────────────────────────────────────────────
+
 
 class TestChartMetadata:
     def test_valid_metadata(self):
@@ -43,6 +44,7 @@ class TestChartMetadata:
 
 # ── ChartDataPoint ─────────────────────────────────────────────────────────────
 
+
 class TestChartDataPoint:
     def test_valid_data_point(self):
         dp = ChartDataPoint(category="North America", value=1200000)
@@ -56,6 +58,7 @@ class TestChartDataPoint:
 
 
 # ── UIComponent ────────────────────────────────────────────────────────────────
+
 
 class TestUIComponent:
     def test_bar_chart(self):
@@ -88,7 +91,9 @@ class TestUIComponent:
     def test_data_table(self):
         comp = UIComponent(
             component_type="DataTable",
-            metadata=ChartMetadata(title="Top Accounts", source="salesforce-mcp", confidence_score=0.85),
+            metadata=ChartMetadata(
+                title="Top Accounts", source="salesforce-mcp", confidence_score=0.85
+            ),
             data=[
                 {"name": "Acme Corp", "revenue": 500000, "status": "Active"},
                 {"name": "Globex Inc", "revenue": 350000, "status": "Active"},
@@ -117,6 +122,7 @@ class TestUIComponent:
 
 # ── AnalyticsResponse ──────────────────────────────────────────────────────────
 
+
 class TestAnalyticsResponse:
     def test_valid_response(self):
         resp = AnalyticsResponse(
@@ -124,7 +130,9 @@ class TestAnalyticsResponse:
             components=[
                 UIComponent(
                     component_type="BarChart",
-                    metadata=ChartMetadata(title="Q3 Revenue", source="salesforce-mcp", confidence_score=0.95),
+                    metadata=ChartMetadata(
+                        title="Q3 Revenue", source="salesforce-mcp", confidence_score=0.95
+                    ),
                     data=[ChartDataPoint(category="NA", value=1200000)],
                 ),
             ],
@@ -142,6 +150,7 @@ class TestAnalyticsResponse:
 
 
 # ── IntentResult ───────────────────────────────────────────────────────────────
+
 
 class TestIntentResult:
     def test_data_query_intent(self):

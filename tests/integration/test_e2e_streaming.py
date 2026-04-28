@@ -17,13 +17,12 @@ Data Stream Protocol (Vercel AI SDK compatible):
   3:"error"               — Error message
   d:{finishReason}        — Stream end (stop | error | length)
 """
+
 import json
 import pytest
 import httpx
-from unittest.mock import AsyncMock, MagicMock, patch
-from typing import AsyncIterator
+from unittest.mock import AsyncMock, patch
 
-from langchain_core.messages import HumanMessage, AIMessage
 
 from src.app import app
 from src.schemas.intent import IntentResult, QueryPlanStep
@@ -163,6 +162,7 @@ async def app_with_mocks(mock_bridges, mock_config, mock_router_llm, mock_synthe
 
     # Build the real graph with mocks
     with patch("src.graph.make_chat_llm") as mock_make_llm:
+
         def llm_factory(route, **kwargs):
             if "router" in route:
                 return llm_router
@@ -207,40 +207,44 @@ class TestDataQueryE2E:
         app_instance, router_structured, synthesis_structured = app_with_mocks
 
         # Configure mocks for this test
-        router_structured.ainvoke = AsyncMock(return_value=IntentResult(
-            intent="data_query",
-            query_plan=[
-                QueryPlanStep(
-                    tool_name="execute_read_query",
-                    mcp_server="data-mcp",
-                    parameters={"query": "SELECT * FROM salesforce.\"Opportunity\" LIMIT 10"},
-                    description="Fetch top 10 opportunities",
-                ),
-            ],
-            reasoning="User is asking for opportunity data from Salesforce.",
-        ))
-
-        synthesis_structured.ainvoke = AsyncMock(return_value=AnalyticsResponse(
-            narrative="The top opportunities show strong pipeline momentum. Average deal size is growing.",
-            components=[
-                UIComponent(
-                    component_type="BarChart",
-                    metadata=ChartMetadata(
-                        title="Top Opportunities by Amount",
-                        source="data-mcp",
-                        confidence_score=0.95,
-                        format_hint="currency",
-                        x_label="Account Name",
-                        y_label="Amount ($)",
+        router_structured.ainvoke = AsyncMock(
+            return_value=IntentResult(
+                intent="data_query",
+                query_plan=[
+                    QueryPlanStep(
+                        tool_name="execute_read_query",
+                        mcp_server="data-mcp",
+                        parameters={"query": 'SELECT * FROM salesforce."Opportunity" LIMIT 10'},
+                        description="Fetch top 10 opportunities",
                     ),
-                    data=[
-                        ChartDataPoint(category="Acme Corp", value=500000),
-                        ChartDataPoint(category="Widget Inc", value=350000),
-                        ChartDataPoint(category="Tech Solutions", value=275000),
-                    ],
-                ),
-            ],
-        ))
+                ],
+                reasoning="User is asking for opportunity data from Salesforce.",
+            )
+        )
+
+        synthesis_structured.ainvoke = AsyncMock(
+            return_value=AnalyticsResponse(
+                narrative="The top opportunities show strong pipeline momentum. Average deal size is growing.",
+                components=[
+                    UIComponent(
+                        component_type="BarChart",
+                        metadata=ChartMetadata(
+                            title="Top Opportunities by Amount",
+                            source="data-mcp",
+                            confidence_score=0.95,
+                            format_hint="currency",
+                            x_label="Account Name",
+                            y_label="Amount ($)",
+                        ),
+                        data=[
+                            ChartDataPoint(category="Acme Corp", value=500000),
+                            ChartDataPoint(category="Widget Inc", value=350000),
+                            ChartDataPoint(category="Tech Solutions", value=275000),
+                        ],
+                    ),
+                ],
+            )
+        )
 
         # Make the request using httpx AsyncClient with ASGI transport
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app_instance)) as client:
@@ -285,48 +289,64 @@ class TestDataQueryE2E:
         app_instance, router_structured, synthesis_structured = app_with_mocks
 
         # Configure for multi-step query plan
-        router_structured.ainvoke = AsyncMock(return_value=IntentResult(
-            intent="data_query",
-            query_plan=[
-                QueryPlanStep(
-                    tool_name="get_salesforce_summary",
-                    mcp_server="salesforce-mcp",
-                    parameters={"client_name": "Acme Corp"},
-                    description="Get Salesforce pipeline for Acme",
-                ),
-                QueryPlanStep(
-                    tool_name="get_payment_summary",
-                    mcp_server="payments-mcp",
-                    parameters={"client_name": "Acme Corp"},
-                    description="Get payment activity for Acme",
-                ),
-            ],
-            reasoning="User wants a complete view of Acme. Need both CRM and payments data.",
-        ))
-
-        synthesis_structured.ainvoke = AsyncMock(return_value=AnalyticsResponse(
-            narrative="Acme Corp has $2.5M in pipeline and processed $47.5M in payments this year.",
-            components=[
-                UIComponent(
-                    component_type="KPICard",
-                    metadata=ChartMetadata(
-                        title="Acme Corp Metrics",
-                        source="salesforce-mcp",
-                        confidence_score=0.92,
+        router_structured.ainvoke = AsyncMock(
+            return_value=IntentResult(
+                intent="data_query",
+                query_plan=[
+                    QueryPlanStep(
+                        tool_name="get_salesforce_summary",
+                        mcp_server="salesforce-mcp",
+                        parameters={"client_name": "Acme Corp"},
+                        description="Get Salesforce pipeline for Acme",
                     ),
-                    data=[
-                        {"label": "Pipeline Value", "value": 2500000, "trend": "up", "change": 12.5},
-                        {"label": "Payment Volume", "value": 47500000, "trend": "up", "change": 8.3},
-                    ],
-                ),
-            ],
-        ))
+                    QueryPlanStep(
+                        tool_name="get_payment_summary",
+                        mcp_server="payments-mcp",
+                        parameters={"client_name": "Acme Corp"},
+                        description="Get payment activity for Acme",
+                    ),
+                ],
+                reasoning="User wants a complete view of Acme. Need both CRM and payments data.",
+            )
+        )
+
+        synthesis_structured.ainvoke = AsyncMock(
+            return_value=AnalyticsResponse(
+                narrative="Acme Corp has $2.5M in pipeline and processed $47.5M in payments this year.",
+                components=[
+                    UIComponent(
+                        component_type="KPICard",
+                        metadata=ChartMetadata(
+                            title="Acme Corp Metrics",
+                            source="salesforce-mcp",
+                            confidence_score=0.92,
+                        ),
+                        data=[
+                            {
+                                "label": "Pipeline Value",
+                                "value": 2500000,
+                                "trend": "up",
+                                "change": 12.5,
+                            },
+                            {
+                                "label": "Payment Volume",
+                                "value": 47500000,
+                                "trend": "up",
+                                "change": 8.3,
+                            },
+                        ],
+                    ),
+                ],
+            )
+        )
 
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app_instance)) as client:
             response = await client.post(
                 "/api/v1/analytics/chat",
                 json={
-                    "messages": [{"role": "user", "content": "Show me a complete view of Acme Corp"}],
+                    "messages": [
+                        {"role": "user", "content": "Show me a complete view of Acme Corp"}
+                    ],
                     "id": "session-456",
                 },
             )
@@ -371,30 +391,34 @@ class TestFollowUpE2E:
         app_instance, router_structured, synthesis_structured = app_with_mocks
 
         # Configure for follow_up
-        router_structured.ainvoke = AsyncMock(return_value=IntentResult(
-            intent="follow_up",
-            query_plan=[],  # No query plan for follow_up
-            reasoning="User is asking about data already retrieved in this conversation.",
-        ))
+        router_structured.ainvoke = AsyncMock(
+            return_value=IntentResult(
+                intent="follow_up",
+                query_plan=[],  # No query plan for follow_up
+                reasoning="User is asking about data already retrieved in this conversation.",
+            )
+        )
 
-        synthesis_structured.ainvoke = AsyncMock(return_value=AnalyticsResponse(
-            narrative="Breaking down the $2.5M pipeline by stage: Negotiation ($800K), Proposal ($700K), Discovery ($1M).",
-            components=[
-                UIComponent(
-                    component_type="PieChart",
-                    metadata=ChartMetadata(
-                        title="Pipeline by Stage",
-                        source="salesforce-mcp",
-                        confidence_score=0.95,
+        synthesis_structured.ainvoke = AsyncMock(
+            return_value=AnalyticsResponse(
+                narrative="Breaking down the $2.5M pipeline by stage: Negotiation ($800K), Proposal ($700K), Discovery ($1M).",
+                components=[
+                    UIComponent(
+                        component_type="PieChart",
+                        metadata=ChartMetadata(
+                            title="Pipeline by Stage",
+                            source="salesforce-mcp",
+                            confidence_score=0.95,
+                        ),
+                        data=[
+                            ChartDataPoint(category="Negotiation", value=800000),
+                            ChartDataPoint(category="Proposal", value=700000),
+                            ChartDataPoint(category="Discovery", value=1000000),
+                        ],
                     ),
-                    data=[
-                        ChartDataPoint(category="Negotiation", value=800000),
-                        ChartDataPoint(category="Proposal", value=700000),
-                        ChartDataPoint(category="Discovery", value=1000000),
-                    ],
-                ),
-            ],
-        ))
+                ],
+            )
+        )
 
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app_instance)) as client:
             response = await client.post(
@@ -446,12 +470,14 @@ class TestClarificationE2E:
         app_instance, router_structured, synthesis_structured = app_with_mocks
 
         # Configure for clarification
-        router_structured.ainvoke = AsyncMock(return_value=IntentResult(
-            intent="clarification",
-            query_plan=[],
-            reasoning="User's request is too vague to determine intent.",
-            clarification_message="I can help you analyze sales data, pipelines, payments, and news. Could you be more specific about what you'd like to see?",
-        ))
+        router_structured.ainvoke = AsyncMock(
+            return_value=IntentResult(
+                intent="clarification",
+                query_plan=[],
+                reasoning="User's request is too vague to determine intent.",
+                clarification_message="I can help you analyze sales data, pipelines, payments, and news. Could you be more specific about what you'd like to see?",
+            )
+        )
 
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app_instance)) as client:
             response = await client.post(
@@ -471,8 +497,9 @@ class TestClarificationE2E:
         text_tokens = parser.get_text_tokens()
         reasoning_tokens = parser.get_reasoning_tokens()
 
-        assert (len(text_tokens) > 0 or len(reasoning_tokens) > 0), \
+        assert len(text_tokens) > 0 or len(reasoning_tokens) > 0, (
             "Clarification should provide helpful guidance"
+        )
 
         # Should have finish event
         finish_events = parser.get_finish_events()
@@ -500,23 +527,27 @@ class TestErrorHandlingE2E:
         app_instance, router_structured, synthesis_structured = app_with_mocks
 
         # Configure intent
-        router_structured.ainvoke = AsyncMock(return_value=IntentResult(
-            intent="data_query",
-            query_plan=[
-                QueryPlanStep(
-                    tool_name="execute_read_query",
-                    mcp_server="data-mcp",
-                    parameters={"query": "SELECT * FROM nonexistent_table"},
-                    description="This will fail",
-                ),
-            ],
-            reasoning="User is asking for data.",
-        ))
+        router_structured.ainvoke = AsyncMock(
+            return_value=IntentResult(
+                intent="data_query",
+                query_plan=[
+                    QueryPlanStep(
+                        tool_name="execute_read_query",
+                        mcp_server="data-mcp",
+                        parameters={"query": "SELECT * FROM nonexistent_table"},
+                        description="This will fail",
+                    ),
+                ],
+                reasoning="User is asking for data.",
+            )
+        )
 
         # Configure synthesis to handle error gracefully
-        synthesis_structured.ainvoke = AsyncMock(return_value=AnalyticsResponse(
-            narrative="The requested data could not be retrieved due to an error. Please try a different query.",
-        ))
+        synthesis_structured.ainvoke = AsyncMock(
+            return_value=AnalyticsResponse(
+                narrative="The requested data could not be retrieved due to an error. Please try a different query.",
+            )
+        )
 
         # Make the data-mcp tool fail
         mock_bridges["data-mcp"].invoke = AsyncMock(
@@ -544,8 +575,9 @@ class TestErrorHandlingE2E:
         # Should have narrative fallback
         text_tokens = parser.get_text_tokens()
         reasoning_tokens = parser.get_reasoning_tokens()
-        assert (len(text_tokens) > 0 or len(reasoning_tokens) > 0), \
+        assert len(text_tokens) > 0 or len(reasoning_tokens) > 0, (
             "Should have some response content"
+        )
 
     async def test_llm_failure_graceful_degradation(self, app_with_mocks):
         """Test that LLM failures degrade gracefully.
@@ -563,15 +595,15 @@ class TestErrorHandlingE2E:
         app_instance, router_structured, synthesis_structured = app_with_mocks
 
         # Configure successful intent
-        router_structured.ainvoke = AsyncMock(return_value=IntentResult(
-            intent="follow_up",
-            reasoning="This is a follow-up.",
-        ))
+        router_structured.ainvoke = AsyncMock(
+            return_value=IntentResult(
+                intent="follow_up",
+                reasoning="This is a follow-up.",
+            )
+        )
 
         # But synthesis fails
-        synthesis_structured.ainvoke = AsyncMock(
-            side_effect=Exception("LLM service overloaded")
-        )
+        synthesis_structured.ainvoke = AsyncMock(side_effect=Exception("LLM service overloaded"))
 
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app_instance)) as client:
             response = await client.post(
@@ -593,11 +625,7 @@ class TestErrorHandlingE2E:
 
         # May have error messages
         errors = parser.get_errors()
-        content = (
-            parser.get_text_tokens() +
-            parser.get_reasoning_tokens() +
-            errors
-        )
+        content = parser.get_text_tokens() + parser.get_reasoning_tokens() + errors
         assert len(content) > 0, "Should provide some feedback to user"
 
 
@@ -609,13 +637,17 @@ class TestDataStreamProtocol:
         """Verify the response has correct content-type and headers."""
         app_instance, router_structured, synthesis_structured = app_with_mocks
 
-        router_structured.ainvoke = AsyncMock(return_value=IntentResult(
-            intent="follow_up",
-        ))
+        router_structured.ainvoke = AsyncMock(
+            return_value=IntentResult(
+                intent="follow_up",
+            )
+        )
 
-        synthesis_structured.ainvoke = AsyncMock(return_value=AnalyticsResponse(
-            narrative="Test response",
-        ))
+        synthesis_structured.ainvoke = AsyncMock(
+            return_value=AnalyticsResponse(
+                narrative="Test response",
+            )
+        )
 
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app_instance)) as client:
             response = await client.post(
@@ -650,11 +682,7 @@ class TestDataStreamProtocol:
         assert len(finish_events) > 0, "Finish event must always be sent"
 
         # Should have either error or text content
-        all_content = (
-            parser.get_text_tokens() +
-            parser.get_reasoning_tokens() +
-            parser.get_errors()
-        )
+        all_content = parser.get_text_tokens() + parser.get_reasoning_tokens() + parser.get_errors()
         assert len(all_content) > 0, "Should provide error/feedback"
 
     async def test_reasoning_before_narrative(self, app_with_mocks, mock_bridges):
@@ -665,22 +693,26 @@ class TestDataStreamProtocol:
         """
         app_instance, router_structured, synthesis_structured = app_with_mocks
 
-        router_structured.ainvoke = AsyncMock(return_value=IntentResult(
-            intent="data_query",
-            query_plan=[
-                QueryPlanStep(
-                    tool_name="execute_read_query",
-                    mcp_server="data-mcp",
-                    parameters={"query": "SELECT 1"},
-                    description="Simple query",
-                ),
-            ],
-            reasoning="Classified as data_query.",
-        ))
+        router_structured.ainvoke = AsyncMock(
+            return_value=IntentResult(
+                intent="data_query",
+                query_plan=[
+                    QueryPlanStep(
+                        tool_name="execute_read_query",
+                        mcp_server="data-mcp",
+                        parameters={"query": "SELECT 1"},
+                        description="Simple query",
+                    ),
+                ],
+                reasoning="Classified as data_query.",
+            )
+        )
 
-        synthesis_structured.ainvoke = AsyncMock(return_value=AnalyticsResponse(
-            narrative="Results show interesting trends.",
-        ))
+        synthesis_structured.ainvoke = AsyncMock(
+            return_value=AnalyticsResponse(
+                narrative="Results show interesting trends.",
+            )
+        )
 
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app_instance)) as client:
             response = await client.post(
@@ -705,8 +737,9 @@ class TestDataStreamProtocol:
         if reasoning_indices and narrative_indices:
             first_reasoning = reasoning_indices[0]
             first_narrative = narrative_indices[0]
-            assert first_reasoning < first_narrative, \
+            assert first_reasoning < first_narrative, (
                 "Reasoning tokens should appear before narrative in the stream"
+            )
 
     async def test_json_parsing_correctness(self, app_with_mocks):
         """Verify that all JSON payloads are valid and parseable.
@@ -716,25 +749,29 @@ class TestDataStreamProtocol:
         """
         app_instance, router_structured, synthesis_structured = app_with_mocks
 
-        router_structured.ainvoke = AsyncMock(return_value=IntentResult(
-            intent="follow_up",
-            reasoning="User is asking a follow-up question.",
-        ))
+        router_structured.ainvoke = AsyncMock(
+            return_value=IntentResult(
+                intent="follow_up",
+                reasoning="User is asking a follow-up question.",
+            )
+        )
 
-        synthesis_structured.ainvoke = AsyncMock(return_value=AnalyticsResponse(
-            narrative="The data shows a 15% increase.",
-            components=[
-                UIComponent(
-                    component_type="BarChart",
-                    metadata=ChartMetadata(
-                        title="Test Chart",
-                        source="test-mcp",
-                        confidence_score=0.85,
+        synthesis_structured.ainvoke = AsyncMock(
+            return_value=AnalyticsResponse(
+                narrative="The data shows a 15% increase.",
+                components=[
+                    UIComponent(
+                        component_type="BarChart",
+                        metadata=ChartMetadata(
+                            title="Test Chart",
+                            source="test-mcp",
+                            confidence_score=0.85,
+                        ),
+                        data=[ChartDataPoint(category="A", value=100)],
                     ),
-                    data=[ChartDataPoint(category="A", value=100)],
-                ),
-            ],
-        ))
+                ],
+            )
+        )
 
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app_instance)) as client:
             response = await client.post(
@@ -747,8 +784,7 @@ class TestDataStreamProtocol:
 
         # All events should be parseable (no "error" field)
         parse_errors = [e for e in parsed_events if e.get("error")]
-        assert len(parse_errors) == 0, \
-            f"All lines should be valid JSON: {parse_errors}"
+        assert len(parse_errors) == 0, f"All lines should be valid JSON: {parse_errors}"
 
         # Verify structure of specific event types
         finish_events = parser.get_finish_events()
@@ -785,13 +821,17 @@ class TestDataStreamProtocol:
         """
         app_instance, router_structured, synthesis_structured = app_with_mocks
 
-        router_structured.ainvoke = AsyncMock(return_value=IntentResult(
-            intent="follow_up",
-        ))
+        router_structured.ainvoke = AsyncMock(
+            return_value=IntentResult(
+                intent="follow_up",
+            )
+        )
 
-        synthesis_structured.ainvoke = AsyncMock(return_value=AnalyticsResponse(
-            narrative="Test",
-        ))
+        synthesis_structured.ainvoke = AsyncMock(
+            return_value=AnalyticsResponse(
+                narrative="Test",
+            )
+        )
 
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app_instance)) as client:
             response = await client.post(
@@ -807,5 +847,6 @@ class TestDataStreamProtocol:
         for line in lines:
             if line.strip():
                 event = parser.parse_line(line)
-                assert "error" not in event or event.get("error") is None, \
+                assert "error" not in event or event.get("error") is None, (
                     f"Line should be valid: {line}"
+                )

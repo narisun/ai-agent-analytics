@@ -4,12 +4,13 @@ Tracks requests per session_id with configurable limit (default: 20 req/min).
 Uses in-memory sliding window with periodic cleanup of stale sessions.
 Returns HTTP 429 with Retry-After header when limit exceeded.
 """
+
 import os
 import time
 from collections import defaultdict
 from typing import Optional
 
-from fastapi import Depends, HTTPException, Request
+from fastapi import HTTPException, Request
 from platform_sdk import get_logger
 
 log = get_logger(__name__)
@@ -28,7 +29,9 @@ class RateLimiter:
     periodically to prevent memory growth.
     """
 
-    def __init__(self, rpm_limit: int = RATE_LIMIT_RPM, window_seconds: int = RATE_LIMIT_WINDOW_SECONDS):
+    def __init__(
+        self, rpm_limit: int = RATE_LIMIT_RPM, window_seconds: int = RATE_LIMIT_WINDOW_SECONDS
+    ):
         """Initialize rate limiter.
 
         Args:

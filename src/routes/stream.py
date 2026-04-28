@@ -9,11 +9,10 @@ Authentication is permissive (anonymous fallback) to preserve the
 pre-Phase-7 behavior. New endpoints use `_user_ctx_from(request)`
 which raises on missing X-User-Email.
 """
+
 from __future__ import annotations
 
 import json
-import uuid
-from typing import Optional
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
@@ -29,6 +28,7 @@ stream_router = APIRouter(prefix="/api/v1/analytics", tags=["stream"])
 
 class StreamRequest(BaseModel):
     """Legacy SSE request body."""
+
     session_id: str = Field(description="Conversation thread ID (UUID)")
     message: str = Field(min_length=1, description="User's analytics query")
 
@@ -58,7 +58,6 @@ async def stream_analytics(body: StreamRequest, request: Request):
     user_email = (request.headers.get("x-user-email", "") or "anonymous").strip().lower()
 
     async def event_generator():
-        active_tool_calls: dict[str, str] = {}
         try:
             async for event in graph.astream_events(
                 {
@@ -76,29 +75,44 @@ async def stream_analytics(body: StreamRequest, request: Request):
                 event_name = event.get("name", "")
 
                 if event_type == "on_chain_start" and event_name in (
-                    "intent_router", "mcp_tool_caller", "synthesis", "error_handler",
+                    "intent_router",
+                    "mcp_tool_caller",
+                    "synthesis",
+                    "error_handler",
                 ):
-                    yield _sse_event("tool_call_start", {
-                        "node": event_name,
-                        "run_id": str(event.get("run_id", "")),
-                    })
+                    yield _sse_event(
+                        "tool_call_start",
+                        {
+                            "node": event_name,
+                            "run_id": str(event.get("run_id", "")),
+                        },
+                    )
                 elif event_type == "on_chain_end" and event_name in (
-                    "intent_router", "mcp_tool_caller", "synthesis", "error_handler",
+                    "intent_router",
+                    "mcp_tool_caller",
+                    "synthesis",
+                    "error_handler",
                 ):
                     output = event.get("data", {}).get("output", {}) or {}
 
                     if event_name == "intent_router" and "intent_reasoning" in output:
-                        yield _sse_event("tool_call_end", {
-                            "node": event_name,
-                            "intent": output.get("intent"),
-                            "reasoning": output.get("intent_reasoning"),
-                            "plan_steps": len(output.get("query_plan", [])),
-                        })
+                        yield _sse_event(
+                            "tool_call_end",
+                            {
+                                "node": event_name,
+                                "intent": output.get("intent"),
+                                "reasoning": output.get("intent_reasoning"),
+                                "plan_steps": len(output.get("query_plan", [])),
+                            },
+                        )
                     elif event_name == "mcp_tool_caller" and "active_tools" in output:
-                        yield _sse_event("tool_call_end", {
-                            "node": event_name,
-                            "tools": output.get("active_tools", []),
-                        })
+                        yield _sse_event(
+                            "tool_call_end",
+                            {
+                                "node": event_name,
+                                "tools": output.get("active_tools", []),
+                            },
+                        )
                     elif event_name == "synthesis" and "ui_components" in output:
                         yield _sse_event("tool_call_end", {"node": event_name})
                         for component in output.get("ui_components", []):

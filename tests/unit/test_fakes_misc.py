@@ -1,4 +1,5 @@
 """Unit tests for FakeStreamEncoder, FakeTelemetryScope, FakeCompactionModifier."""
+
 from src.ports import (
     CompactionModifier,
     StreamEncoder,
@@ -34,7 +35,7 @@ def test_encoder_records_events():
 
 def test_telemetry_records_spans_and_events():
     t = FakeTelemetryScope()
-    with t.start_span("step1") as span:
+    with t.start_span("step1"):
         t.record_event("work", x=1)
     assert t.spans == ["step1"]
     assert t.events == [("work", {"x": 1})]

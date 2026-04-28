@@ -6,7 +6,6 @@ All data is lost on shutdown.
 
 import uuid
 from datetime import datetime
-from typing import Optional
 
 from platform_sdk import get_logger
 
