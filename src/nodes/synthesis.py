@@ -53,6 +53,20 @@ def _category_is_date_like(value) -> bool:
     return any(p.match(value) for p in _DATE_LIKE_PATTERNS)
 
 
+def _value_of(d) -> float:
+    """Extract the numeric `value` from a chart data point.
+
+    `comp.data` may hold raw dicts OR Pydantic ChartDataPoint instances;
+    both expose `.value` but via different access patterns. Returns 0
+    when the field is missing or non-numeric, so sorting never raises.
+    """
+    raw = d.get("value", 0) if isinstance(d, dict) else getattr(d, "value", 0)
+    try:
+        return float(raw)
+    except (TypeError, ValueError):
+        return 0.0
+
+
 # Template — {max_data_points} is resolved inside make_synthesis_node() using
 # the runtime config value so operators can tune it without code changes.
 _SYNTHESIS_SYSTEM_PROMPT_TEMPLATE = """You are a data analyst for an enterprise analytics platform.
@@ -162,6 +176,14 @@ narrative — do not manufacture a component for the sake of having one.
    For DATE columns, keep the original value (integer like 20250803 or string like "2025-08-03") —
    the frontend will detect and format it correctly.
 8. The narrative should reference specific numbers and trends from the data.
+   **Verify ranking claims before stating them.** When you say "X has the
+   highest / largest / top / most …", scan EVERY row and identify the actual
+   maximum on the measure you are describing. The data may be sorted by a
+   different column than the one you are reporting (e.g. SQL `ORDER BY count`
+   on data you describe by amount), so the first row is NOT necessarily the
+   answer. The same applies to "lowest / smallest / fewest" — verify against
+   the full dataset. If you mention a runner-up ("follows closely with X"),
+   the runner-up's value MUST be lower than the leader's.
 9. If data contains errors, acknowledge them in the narrative and reduce confidence_score.
 10. If the raw data contains a "_client_suggestions" key, the requested client was not found.
     In this case, your narrative MUST:
@@ -297,6 +319,21 @@ class SynthesisNode:
                             )
                             comp.component_type = "BarChart"
 
+                # Post-process: BarChart bars must be in descending order by
+                # value so the visual matches a "top / highest / largest"
+                # narrative regardless of which column the SQL ORDER BY used.
+                # Without this, a SQL `ORDER BY count` on data plotted by amount
+                # makes the leftmost bar look largest when it isn't (see
+                # test_barchart_data_sorted_desc_by_value).
+                # LineChart / AreaChart preserve input order — they are
+                # time-series and the X-axis is the date sequence.
+                for comp in result.components:
+                    if comp.component_type == "BarChart" and comp.data:
+                        try:
+                            comp.data = sorted(comp.data, key=_value_of, reverse=True)
+                        except (TypeError, AttributeError):
+                            pass
+
                 # Post-process: enforce chart_max_data_points on each component.
                 # This is a safety net — the LLM should respect the limit in the prompt,
                 # but structured output parsing can return more items than instructed.
@@ -311,13 +348,11 @@ class SynthesisNode:
                             original_count=len(comp.data),
                             truncated_to=chart_max_data_points,
                         )
-                        # Sort descending by "value" and keep top N
+                        # Sort descending by "value" and keep top N (BarChart
+                        # was already sorted above; this also handles the
+                        # rarer LineChart / AreaChart truncation case).
                         try:
-                            sorted_data = sorted(
-                                comp.data,
-                                key=lambda d: d.get("value", 0) if isinstance(d, dict) else 0,
-                                reverse=True,
-                            )
+                            sorted_data = sorted(comp.data, key=_value_of, reverse=True)
                             comp.data = sorted_data[:chart_max_data_points]
                         except (TypeError, AttributeError):
                             comp.data = comp.data[:chart_max_data_points]
