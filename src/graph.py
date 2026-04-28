@@ -12,18 +12,16 @@ Model tiering:
   synthesis:        complex-routing (GPT-4o — high-quality narrative + charts)
   error_handler:    no LLM       (pure Python — error/clarification messages)
 """
+
 from typing import Optional
 
 from langgraph.graph import END, StateGraph
 
-from platform_sdk import AgentConfig, get_logger, make_chat_llm, make_checkpointer, setup_checkpointer
+from platform_sdk import AgentConfig, get_logger, make_chat_llm, make_checkpointer
 from platform_sdk.compaction import make_compaction_modifier
 from platform_sdk.prompts import PromptLoader
 from .state import AnalyticsState
-from .nodes.intent_router import make_intent_router_node, route_after_intent
-from .nodes.mcp_tool_caller import make_mcp_tool_caller_node
-from .nodes.synthesis import make_synthesis_node
-from .nodes.error_handler import make_error_handler_node
+from .nodes.intent_router import route_after_intent
 
 from .nodes.error_handler import ErrorHandlerNode
 from .nodes.intent_router import IntentRouterNode

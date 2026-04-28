@@ -19,13 +19,14 @@ Tests construct their own AppDependencies via
 `tests.fakes.build_test_deps.build_test_dependencies()` and call
 `create_app(deps)` directly — no lifespan, no env, no Docker.
 """
+
 from __future__ import annotations
 
 import asyncio
 import os
 import uuid
 from contextlib import asynccontextmanager
-from typing import Any, Callable
+from typing import Callable
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -131,15 +132,14 @@ async def lifespan(app: FastAPI):
     )
 
     mcp_urls = {
-        "data-mcp":         os.getenv("DATA_MCP_URL",       "http://data-mcp:8000/sse"),
-        "salesforce-mcp":   os.getenv("SALESFORCE_MCP_URL", "http://salesforce-mcp:8000/sse"),
-        "payments-mcp":     os.getenv("PAYMENTS_MCP_URL",   "http://payments-mcp:8000/sse"),
-        "news-search-mcp":  os.getenv("NEWS_MCP_URL",       "http://news-search-mcp:8000/sse"),
+        "data-mcp": os.getenv("DATA_MCP_URL", "http://data-mcp:8000/sse"),
+        "salesforce-mcp": os.getenv("SALESFORCE_MCP_URL", "http://salesforce-mcp:8000/sse"),
+        "payments-mcp": os.getenv("PAYMENTS_MCP_URL", "http://payments-mcp:8000/sse"),
+        "news-search-mcp": os.getenv("NEWS_MCP_URL", "http://news-search-mcp:8000/sse"),
     }
 
     bridges: dict[str, MCPToolBridge] = {
-        name: MCPToolBridge(url, agent_context=agent_context)
-        for name, url in mcp_urls.items()
+        name: MCPToolBridge(url, agent_context=agent_context) for name, url in mcp_urls.items()
     }
 
     log.info(
@@ -148,7 +148,10 @@ async def lifespan(app: FastAPI):
         timeout=config.mcp_startup_timeout,
     )
     await asyncio.gather(
-        *[bridge.connect(startup_timeout=config.mcp_startup_timeout) for bridge in bridges.values()],
+        *[
+            bridge.connect(startup_timeout=config.mcp_startup_timeout)
+            for bridge in bridges.values()
+        ],
         return_exceptions=True,
     )
     for name, bridge in bridges.items():

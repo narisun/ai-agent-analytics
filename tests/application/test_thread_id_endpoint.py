@@ -7,8 +7,8 @@ headers arrive at the graph with distinct configurable.thread_id
 values — Phase 0b's tenant-isolation guarantee, validated through the
 new SoC/DI structure.
 """
+
 import os
-from contextlib import contextmanager
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -20,7 +20,7 @@ os.environ.setdefault("INTERNAL_API_KEY", "test-internal-api-key")
 
 from src.app import create_app  # noqa: E402
 from src.app_dependencies import AppDependencies  # noqa: E402
-from src.domain.types import ChatRequest, UserContext  # noqa: E402
+from src.domain.types import UserContext  # noqa: E402
 from src.services.chat_service import ChatService  # noqa: E402
 from tests.fakes.fake_conversation_store import FakeConversationStore  # noqa: E402
 from tests.fakes.fake_stream_encoder import FakeStreamEncoder  # noqa: E402
@@ -103,9 +103,7 @@ class TestChatEndpointThreadIdIsolation:
         assert "alice@example.com" in thread_id
         assert "shared-session-uuid" in thread_id
 
-    def test_two_users_with_same_session_id_get_distinct_thread_ids(
-        self, client, captured_configs
-    ):
+    def test_two_users_with_same_session_id_get_distinct_thread_ids(self, client, captured_configs):
         payload = {
             "id": "shared-session-uuid",
             "messages": [{"role": "user", "content": "hi"}],
@@ -151,9 +149,7 @@ class TestStreamEndpointThreadIdIsolation:
         assert "alice@example.com" in thread_id
         assert "shared-session-uuid" in thread_id
 
-    def test_two_users_with_same_session_id_get_distinct_thread_ids(
-        self, client, captured_configs
-    ):
+    def test_two_users_with_same_session_id_get_distinct_thread_ids(self, client, captured_configs):
         payload = {"session_id": "shared-session-uuid", "message": "hi"}
         for email in ("alice@example.com", "bob@example.com"):
             client.post(
