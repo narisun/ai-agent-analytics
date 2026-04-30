@@ -1,0 +1,22 @@
+name: CI
+
+on:
+  push:
+    branches: [main, "release/*"]
+  pull_request:
+
+jobs:
+  unit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install dependencies (rewrite SDK pin to https for CI)
+        run: |
+          sed 's|git+ssh://git@github.com/|git+https://github.com/|g' requirements.txt > /tmp/requirements-ci.txt
+          pip install -r /tmp/requirements-ci.txt
+          pip install pytest pytest-asyncio pyjwt httpx
+      - name: Run unit tests
+        run: pytest tests/unit -v -m unit

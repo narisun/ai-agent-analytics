@@ -1,14 +1,13 @@
-# Build context: monorepo root (docker build -f agents/analytics-agent/Dockerfile .)
-# After Phase 5 carve-out, build context is the agent's own repo root.
+# ai-agent-analytics — built on the SDK-bundled base image.
 ARG BASE_TAG=3.11-sdk0.4.0
 FROM ghcr.io/narisun/ai-python-base:${BASE_TAG}
 
 WORKDIR /app
 
-COPY agents/analytics-agent/requirements.txt .
+COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY agents/analytics-agent/src/ /app/src/
+COPY src/ /app/src/
 
 USER appuser
 EXPOSE 8000
