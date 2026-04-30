@@ -1,47 +1,43 @@
-"""Analytics Agent — FastAPI application factory.
+"""Analytics Agent — FastAPI app, built on platform_sdk.BaseAgentApp.
 
-create_app(deps: AppDependencies) is a pure function — no env reads, no
-I/O, no module-level state. It registers routes, middleware, and
-exception handlers on a fresh FastAPI instance using the provided
-dependencies, and returns it.
+The agent subclasses :class:`platform_sdk.BaseAgentApp`, which owns the
+FastAPI lifespan: telemetry init, MCP bridge connection, checkpointer
+setup, conversation-store init, CORS, exception handler registration,
+and router inclusion. Analytics-specific wiring lives in three hooks:
 
-Production startup goes through `lifespan(app)`, which reads the
-environment, connects MCP bridges, builds the LangGraph graph,
-constructs the conversation store, and assembles the real
-AppDependencies. The lifespan is the ONLY place that performs I/O at
-startup.
+  * :meth:`build_dependencies` — sync; assembles the ``AppDependencies``
+    dataclass for the route handlers (no I/O).
+  * :meth:`on_started` — async; performs the one-shot data-mcp schema
+    fetch and rebuilds the LangGraph with the schema injected. Runs
+    after ``build_dependencies`` returns and after ``app.state.deps``
+    is set, so routes never see a partially-initialised graph.
+  * :meth:`register_exception_handlers` — domain-error → HTTP mapping.
 
-The module-level `app` exists so uvicorn can find it
-(`uvicorn src.app:app`); it starts with empty placeholder deps and is
-populated by lifespan() on startup.
+Tests build their own ``AppDependencies`` via
+``tests.fakes.build_test_deps.build_test_dependencies()`` and call
+``create_app(deps)`` directly — no lifespan, no env, no Docker.
 
-Tests construct their own AppDependencies via
-`tests.fakes.build_test_deps.build_test_dependencies()` and call
-`create_app(deps)` directly — no lifespan, no env, no Docker.
+The module-level ``app`` symbol is created with placeholder empty deps
+so ``uvicorn src.app:app`` can import it without env vars; lifespan
+populates the real deps on startup.
 """
 
 from __future__ import annotations
 
-import asyncio
 import os
 import uuid
-from contextlib import asynccontextmanager
-from typing import Callable
+from contextlib import contextmanager
+from typing import Any, Callable, Iterable
 
 from fastapi import FastAPI, Request
-from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from platform_sdk import (
     AgentConfig,
     AgentContext,
-    configure_logging,
-    flush_langfuse,
+    BaseAgentApp,
     get_logger,
-    setup_checkpointer,
-    setup_telemetry,
 )
-from platform_sdk.mcp_bridge import MCPToolBridge
 
 from .app_dependencies import AppDependencies
 from .domain.errors import AnalyticsError, AuthError, ConversationNotFound
@@ -55,27 +51,7 @@ from .routes.stream import stream_router
 from .services.chat_service import ChatService
 from .streaming.data_stream_encoder import DataStreamEncoder
 
-configure_logging()
 log = get_logger(__name__)
-
-
-# --------------------------------------------------------------------
-# Conversation store factory (env-aware)
-# --------------------------------------------------------------------
-
-
-def _make_conversation_store():
-    """Create the appropriate conversation store based on environment."""
-    db_url = os.getenv("DATABASE_URL")
-    if (
-        db_url
-        and os.getenv("ENVIRONMENT") not in ("local",)
-        and PostgresConversationStore is not None
-    ):
-        return PostgresConversationStore(db_url)
-    if db_url and PostgresConversationStore is None:
-        log.warning("asyncpg_not_available", fallback="MemoryConversationStore")
-    return MemoryConversationStore()
 
 
 async def _fetch_schema_context(data_bridge) -> str:
@@ -110,201 +86,176 @@ async def _fetch_schema_context(data_bridge) -> str:
     return result
 
 
-# --------------------------------------------------------------------
-# Lifespan — the ONLY place that performs startup I/O
-# --------------------------------------------------------------------
+class AnalyticsAgentApp(BaseAgentApp):
+    """Analytics agent FastAPI surface, wired on top of BaseAgentApp."""
 
-
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    """Build real AppDependencies from environment; assign to app.state.deps."""
-    setup_telemetry("analytics-agent")
-    config = AgentConfig.from_env()
-
-    # Service-level AgentContext for outbound MCP SSE connections.
-    agent_context = AgentContext(
-        rm_id="analytics-agent",
-        rm_name="Analytics Agent",
-        role="manager",
-        team_id="analytics",
-        assigned_account_ids=(),
-        compliance_clearance=("standard", "aml_view"),
-    )
-
-    mcp_urls = {
-        "data-mcp": os.getenv("DATA_MCP_URL", "http://data-mcp:8000/sse"),
-        "salesforce-mcp": os.getenv("SALESFORCE_MCP_URL", "http://salesforce-mcp:8000/sse"),
-        "payments-mcp": os.getenv("PAYMENTS_MCP_URL", "http://payments-mcp:8000/sse"),
-        "news-search-mcp": os.getenv("NEWS_MCP_URL", "http://news-search-mcp:8000/sse"),
+    service_name = "analytics-agent"
+    service_title = "Analytics Agent"
+    service_description = "Enterprise Agentic Analytics Platform — LangGraph orchestrator"
+    mcp_servers = {
+        "data-mcp": "http://data-mcp:8000/sse",
+        "salesforce-mcp": "http://salesforce-mcp:8000/sse",
+        "payments-mcp": "http://payments-mcp:8000/sse",
+        "news-search-mcp": "http://news-search-mcp:8000/sse",
     }
+    enable_telemetry = True
+    requires_checkpointer = True
+    requires_conversation_store = True
 
-    bridges: dict[str, MCPToolBridge] = {
-        name: MCPToolBridge(url, agent_context=agent_context) for name, url in mcp_urls.items()
-    }
+    def load_config(self) -> AgentConfig:
+        return AgentConfig.from_env()
 
-    log.info(
-        "mcp_connecting_all",
-        servers=list(mcp_urls.keys()),
-        timeout=config.mcp_startup_timeout,
-    )
-    await asyncio.gather(
-        *[
-            bridge.connect(startup_timeout=config.mcp_startup_timeout)
-            for bridge in bridges.values()
-        ],
-        return_exceptions=True,
-    )
-    for name, bridge in bridges.items():
-        log.info("mcp_startup_status", server=name, connected=bridge.is_connected)
+    def service_agent_context(self) -> AgentContext:
+        return AgentContext(
+            rm_id="analytics-agent",
+            rm_name="Analytics Agent",
+            role="manager",
+            team_id="analytics",
+            assigned_account_ids=(),
+            compliance_clearance=("standard", "aml_view"),
+        )
 
-    # Fetch live database schema context from data-mcp once at startup.
-    # Result is injected into the router's system prompt so the LLM never
-    # hallucinates columns or joins. Falls back to empty string on failure;
-    # the router prints a visible warning rather than erroring out.
-    schema_context = await _fetch_schema_context(bridges.get("data-mcp"))
+    def build_conversation_store(self) -> Any:
+        """Create the appropriate conversation store based on environment."""
+        db_url = os.getenv("DATABASE_URL")
+        if (
+            db_url
+            and os.getenv("ENVIRONMENT") not in ("local",)
+            and PostgresConversationStore is not None
+        ):
+            return PostgresConversationStore(db_url)
+        if db_url and PostgresConversationStore is None:
+            log.warning("asyncpg_not_available", fallback="MemoryConversationStore")
+        return MemoryConversationStore()
 
-    checkpointer = await setup_checkpointer(config)
-    graph = build_analytics_graph(
-        bridges=bridges,
-        config=config,
-        checkpointer=checkpointer,
-        schema_context=schema_context,
-    )
+    def routes(self) -> Iterable[Any]:
+        return [health_router, chat_router, conversations_router, stream_router]
 
-    conversation_store = _make_conversation_store()
-    if hasattr(conversation_store, "connect"):
-        await conversation_store.connect()
+    def register_exception_handlers(self, app: FastAPI) -> None:
+        @app.exception_handler(AuthError)
+        async def _on_auth_error(request: Request, exc: AuthError):
+            return JSONResponse(
+                {"error_id": uuid.uuid4().hex, "type": "auth", "message": str(exc)},
+                status_code=401,
+            )
 
-    encoder_factory: Callable[[], DataStreamEncoder] = lambda: DataStreamEncoder()
+        @app.exception_handler(ConversationNotFound)
+        async def _on_not_found(request: Request, exc: ConversationNotFound):
+            return JSONResponse(
+                {"error_id": uuid.uuid4().hex, "type": "not_found", "message": str(exc)},
+                status_code=404,
+            )
 
-    def chat_service_factory(user_ctx: UserContext) -> ChatService:
-        # FakeTelemetryScope-shaped no-op for the production path until a
-        # real TelemetryScope adapter lands (Phase 9). Inline class avoids
-        # an extra module just to hold a noop scope.
-        from contextlib import contextmanager
+        @app.exception_handler(AnalyticsError)
+        async def _on_analytics_error(request: Request, exc: AnalyticsError):
+            return JSONResponse(
+                {"error_id": uuid.uuid4().hex, "type": "internal"},
+                status_code=500,
+            )
 
-        class _NoopTelemetry:
-            @contextmanager
-            def start_span(self, name):
-                yield None
+    def build_dependencies(self, *, bridges, checkpointer, store) -> AppDependencies:
+        """Assemble AppDependencies (sync). The schema-aware graph is
+        installed later in :meth:`on_started` — see the holder note below.
+        """
+        # NB (Approach B): build_dependencies is sync, but the schema fetch
+        # is async. We construct the graph here with no schema (so routes can
+        # rely on a non-None deps.graph immediately if anything peeked) and
+        # let on_started rebuild it. To keep chat_service_factory bound to
+        # the *final* graph without restructuring AppDependencies, we capture
+        # a tiny mutable holder dict and update it (plus deps.graph) in
+        # on_started. stream.py already reads deps.graph at request time, so
+        # it picks up the schema-aware graph automatically.
+        config = self.load_config()
+        checkpointer_local = checkpointer
+        conversation_store = store
 
-            def record_event(self, name, **attrs):
-                pass
+        encoder_factory: Callable[[], DataStreamEncoder] = lambda: DataStreamEncoder()
 
-        return ChatService(
-            graph=graph,
-            conversation_store=conversation_store,
+        # Initial graph with empty schema context. on_started replaces it.
+        initial_graph = build_analytics_graph(
+            bridges=bridges,
             config=config,
-            user_ctx=user_ctx,
+            checkpointer=checkpointer_local,
+            schema_context="",
+        )
+        graph_holder: dict[str, Any] = {"graph": initial_graph}
+
+        def chat_service_factory(user_ctx: UserContext) -> ChatService:
+            # FakeTelemetryScope-shaped no-op for the production path until a
+            # real TelemetryScope adapter lands (Phase 9). Inline class avoids
+            # an extra module just to hold a noop scope.
+            class _NoopTelemetry:
+                @contextmanager
+                def start_span(self, name):
+                    yield None
+
+                def record_event(self, name, **attrs):
+                    pass
+
+            return ChatService(
+                graph=graph_holder["graph"],
+                conversation_store=conversation_store,
+                config=config,
+                user_ctx=user_ctx,
+                encoder_factory=encoder_factory,
+                telemetry=_NoopTelemetry(),
+            )
+
+        deps = AppDependencies(
+            config=config,
+            graph=initial_graph,
+            conversation_store=conversation_store,
+            mcp_tools_provider=None,
+            llm_factory=None,
+            telemetry=None,
+            compaction=None,
             encoder_factory=encoder_factory,
-            telemetry=_NoopTelemetry(),
+            chat_service_factory=chat_service_factory,
         )
+        # Stash the holder on deps so on_started can update it without a
+        # second closure or a global. Underscored — not part of the public
+        # AppDependencies contract; tests never see it.
+        deps._graph_holder = graph_holder  # type: ignore[attr-defined]
+        return deps
 
-    deps = AppDependencies(
-        config=config,
-        graph=graph,
-        conversation_store=conversation_store,
-        mcp_tools_provider=None,
-        llm_factory=None,
-        telemetry=None,
-        compaction=None,
-        encoder_factory=encoder_factory,
-        chat_service_factory=chat_service_factory,
-    )
-    app.state.deps = deps
-    # Backward-compat: the legacy /stream route reads app.state.bridges
-    # via deps; readiness probe in routes/health.py also looks here.
-    app.state.bridges = bridges
-    log.info("analytics_agent_ready")
+    async def on_started(self, deps, *, bridges, config, checkpointer, store) -> None:
+        """Fetch the live data-mcp schema and rebuild the graph with it.
 
-    yield
-
-    flush_langfuse()
-    if hasattr(conversation_store, "disconnect"):
-        await conversation_store.disconnect()
-    for name, bridge in bridges.items():
-        await bridge.disconnect()
-        log.info("mcp_disconnected", server=name)
-
-
-# --------------------------------------------------------------------
-# create_app(deps) — pure factory, no I/O
-# --------------------------------------------------------------------
-
-
-def create_app(deps: AppDependencies) -> FastAPI:
-    """Create and configure a FastAPI app with the provided dependencies.
-
-    Pure function — no env reads, no I/O. The `deps` object is attached
-    to `app.state.deps` so route handlers can access services via
-    `request.app.state.deps`.
-    """
-    application = FastAPI(
-        title="Analytics Agent",
-        description="Enterprise Agentic Analytics Platform — LangGraph orchestrator",
-        version="1.0.0",
-        lifespan=lifespan,
-    )
-
-    application.state.deps = deps
-
-    # CORS — tightened to avoid wildcard + credentials (invalid per CORS spec).
-    raw_origins = os.getenv("ALLOWED_ORIGINS")
-    if raw_origins and raw_origins != "*":
-        allowed_origins = [o.strip() for o in raw_origins.split(",") if o.strip()]
-        allow_credentials = True
-    else:
-        # Wildcard + credentials is invalid per CORS spec — browsers reject it.
-        # Default to wildcard origins with credentials disabled. Production must
-        # set ALLOWED_ORIGINS to an explicit comma-separated list.
-        allowed_origins = ["*"]
-        allow_credentials = False
-        log.warning(
-            "cors_wildcard_no_credentials",
-            hint="set ALLOWED_ORIGINS=https://your.dashboard.example to enable credentials",
+        Approach B: keeps build_dependencies sync, late-binds the schema
+        into both ``deps.graph`` and the holder dict captured by
+        ``chat_service_factory``. Routes that read ``deps.graph`` (stream.py)
+        and ChatService instances built via the factory (chat.py) all end
+        up using the same schema-aware graph.
+        """
+        schema_context = await _fetch_schema_context(bridges.get("data-mcp"))
+        new_graph = build_analytics_graph(
+            bridges=bridges,
+            config=config,
+            checkpointer=checkpointer,
+            schema_context=schema_context,
         )
-
-    application.add_middleware(
-        CORSMiddleware,
-        allow_origins=allowed_origins,
-        allow_credentials=allow_credentials,
-        allow_methods=["*"],
-        allow_headers=["*"],
-    )
-
-    # Domain → HTTP error handlers.
-    @application.exception_handler(AuthError)
-    async def _on_auth_error(request: Request, exc: AuthError):
-        return JSONResponse(
-            {"error_id": uuid.uuid4().hex, "type": "auth", "message": str(exc)},
-            status_code=401,
-        )
-
-    @application.exception_handler(ConversationNotFound)
-    async def _on_not_found(request: Request, exc: ConversationNotFound):
-        return JSONResponse(
-            {"error_id": uuid.uuid4().hex, "type": "not_found", "message": str(exc)},
-            status_code=404,
-        )
-
-    @application.exception_handler(AnalyticsError)
-    async def _on_analytics_error(request: Request, exc: AnalyticsError):
-        return JSONResponse(
-            {"error_id": uuid.uuid4().hex, "type": "internal"},
-            status_code=500,
-        )
-
-    application.include_router(health_router)
-    application.include_router(chat_router)
-    application.include_router(conversations_router)
-    application.include_router(stream_router)
-
-    return application
+        deps.graph = new_graph
+        holder = getattr(deps, "_graph_holder", None)
+        if holder is not None:
+            holder["graph"] = new_graph
 
 
 # --------------------------------------------------------------------
 # Module-level entry point — uvicorn loads this `app` symbol
 # --------------------------------------------------------------------
+
+
+_agent = AnalyticsAgentApp()
+
+
+def create_app(deps: AppDependencies | None = None) -> FastAPI:
+    """Public factory used by tests and uvicorn.
+
+    Tests pass a fully-built ``AppDependencies`` and skip the lifespan;
+    production callers pass ``None`` (or omit) and rely on the lifespan
+    populating ``app.state.deps``.
+    """
+    return _agent.create_app(deps=deps)
 
 
 _empty_deps = AppDependencies(
@@ -318,4 +269,4 @@ _empty_deps = AppDependencies(
     encoder_factory=None,
     chat_service_factory=None,
 )
-app = create_app(_empty_deps)
+app = _agent.create_app(deps=_empty_deps)
