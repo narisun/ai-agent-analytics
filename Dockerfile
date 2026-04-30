@@ -1,11 +1,13 @@
 # ai-agent-analytics — built on the SDK-bundled base image.
+# The base image (ghcr.io/narisun/ai-python-base) ships the SDK
+# pre-installed; we only add agent-specific runtime extras here.
 ARG BASE_TAG=3.11-sdk0.4.0
 FROM ghcr.io/narisun/ai-python-base:${BASE_TAG}
 
 WORKDIR /app
 
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+COPY requirements-runtime.txt .
+RUN pip install --no-cache-dir -r requirements-runtime.txt
 
 COPY src/ /app/src/
 

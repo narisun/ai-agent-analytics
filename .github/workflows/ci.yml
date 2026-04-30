@@ -19,4 +19,4 @@ jobs:
           pip install -r /tmp/requirements-ci.txt
           pip install pytest pytest-asyncio pyjwt httpx
       - name: Run unit tests
-        run: pytest tests/unit -v -m unit
+        run: pytest tests/unit -v
