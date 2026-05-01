@@ -24,7 +24,6 @@ populates the real deps on startup.
 
 from __future__ import annotations
 
-import os
 import uuid
 from contextlib import contextmanager
 from typing import Any, Callable, Iterable
@@ -92,6 +91,7 @@ class AnalyticsAgentApp(BaseAgentApp):
     service_name = "analytics-agent"
     service_title = "Analytics Agent"
     service_description = "Enterprise Agentic Analytics Platform — LangGraph orchestrator"
+    config_model = AgentConfig
     mcp_dependencies = [
         "data-mcp",
         "salesforce-mcp",
@@ -101,11 +101,6 @@ class AnalyticsAgentApp(BaseAgentApp):
     enable_telemetry = True
     requires_checkpointer = True
     requires_conversation_store = True
-
-    def load_config(self, name: str | None = None) -> AgentConfig:
-        # name is the application name passed by Application.__init__;
-        # we ignore it because AgentConfig.from_env() reads from the environment.
-        return AgentConfig.from_env()
 
     def service_agent_context(self) -> AgentContext:
         return AgentContext(
@@ -118,13 +113,16 @@ class AnalyticsAgentApp(BaseAgentApp):
         )
 
     def build_conversation_store(self) -> Any:
-        """Create the appropriate conversation store based on environment."""
-        db_url = os.getenv("DATABASE_URL")
-        if (
-            db_url
-            and os.getenv("ENVIRONMENT") not in ("local",)
+        """Create the appropriate conversation store based on config."""
+        db_url = self.config.database_url
+        # 'local' was the legacy alias for dev with in-memory store; in 0.6.0
+        # the strict Environment Literal removes 'local'. Use Memory in dev.
+        use_postgres = (
+            bool(db_url)
+            and self.config.environment != "dev"
             and PostgresConversationStore is not None
-        ):
+        )
+        if use_postgres:
             return PostgresConversationStore(db_url)
         if db_url and PostgresConversationStore is None:
             log.warning("asyncpg_not_available", fallback="MemoryConversationStore")
@@ -167,7 +165,7 @@ class AnalyticsAgentApp(BaseAgentApp):
         # a tiny mutable holder dict and update it (plus deps.graph) in
         # on_started. stream.py already reads deps.graph at request time, so
         # it picks up the schema-aware graph automatically.
-        config = self.load_config()
+        config = self.config
         checkpointer_local = checkpointer
         conversation_store = store
 

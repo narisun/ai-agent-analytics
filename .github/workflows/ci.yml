@@ -20,3 +20,14 @@ jobs:
           pip install pytest pytest-asyncio pyjwt httpx
       - name: Run unit tests
         run: pytest tests/unit -v
+
+      - name: check-env-example
+        run: platform-sdk check-env-example --config-dir config --env-example .env.example
+
+      - name: no-adhoc-httpx-async-client
+        run: |
+          if grep -rn --include='*.py' 'httpx\.AsyncClient(' src/; then
+            echo "ERROR: direct httpx.AsyncClient construction found in src/."
+            echo "Use platform_sdk.http.make_internal_http_client instead."
+            exit 1
+          fi
