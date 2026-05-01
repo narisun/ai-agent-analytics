@@ -1,0 +1,43 @@
+# config/default.yaml — analytics-agent base settings.
+environment: dev
+
+# Model routing
+model_route: complex-routing
+summary_model_route: fast-routing
+router_model_route: fast-routing
+specialist_model_route: fast-routing
+synthesis_model_route: complex-routing
+
+# LiteLLM
+litellm_base_url: http://litellm:4000/v1
+internal_api_key: ${INTERNAL_API_KEY}
+
+# Checkpointer
+checkpointer_type: memory
+checkpointer_db_url: ""
+
+# Conversation store
+database_url: ""
+
+# Compaction
+enable_compaction: true
+context_token_limit: 6000
+
+# Safety
+recursion_limit: 10
+max_message_length: 32000
+
+# Tool cache
+enable_tool_cache: true
+tool_cache_ttl_seconds: 300
+
+# MCP bridge
+mcp_startup_timeout: 120.0
+
+# Synthesis
+chart_max_data_points: 20
+
+# Self-registration
+registry_url: http://ai-registry:8090
+service_url: http://analytics-agent:8000
+service_version: "0.6.0"
