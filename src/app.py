@@ -102,7 +102,9 @@ class AnalyticsAgentApp(BaseAgentApp):
     requires_checkpointer = True
     requires_conversation_store = True
 
-    def load_config(self) -> AgentConfig:
+    def load_config(self, name: str | None = None) -> AgentConfig:
+        # name is the application name passed by Application.__init__;
+        # we ignore it because AgentConfig.from_env() reads from the environment.
         return AgentConfig.from_env()
 
     def service_agent_context(self) -> AgentContext:
