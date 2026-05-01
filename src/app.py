@@ -93,10 +93,10 @@ class AnalyticsAgentApp(BaseAgentApp):
     service_title = "Analytics Agent"
     service_description = "Enterprise Agentic Analytics Platform — LangGraph orchestrator"
     mcp_dependencies = [
-        "ai-mcp-data",
-        "ai-mcp-salesforce",
-        "ai-mcp-payments",
-        "ai-mcp-news-search",
+        "data-mcp",
+        "salesforce-mcp",
+        "payments-mcp",
+        "news-search-mcp",
     ]
     enable_telemetry = True
     requires_checkpointer = True
@@ -229,7 +229,7 @@ class AnalyticsAgentApp(BaseAgentApp):
         and ChatService instances built via the factory (chat.py) all end
         up using the same schema-aware graph.
         """
-        schema_context = await _fetch_schema_context(bridges.get("ai-mcp-data"))
+        schema_context = await _fetch_schema_context(bridges.get("data-mcp"))
         new_graph = build_analytics_graph(
             bridges=bridges,
             config=config,
