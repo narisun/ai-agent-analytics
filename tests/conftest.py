@@ -43,7 +43,7 @@ def mock_bridges():
         tool.args_schema = schema
         return tool
 
-    # ai-mcp-data: Database query tool
+    # data-mcp: Database query tool
     data_mcp = MagicMock()
     data_mcp.is_connected = True
     data_mcp.get_langchain_tools = AsyncMock(
@@ -68,9 +68,9 @@ def mock_bridges():
             "execution_time_ms": 150,
         }
     )
-    bridges["ai-mcp-data"] = data_mcp
+    bridges["data-mcp"] = data_mcp
 
-    # ai-mcp-salesforce: Salesforce-specific tools
+    # salesforce-mcp: Salesforce-specific tools
     salesforce_mcp = MagicMock()
     salesforce_mcp.is_connected = True
     salesforce_mcp.get_langchain_tools = AsyncMock(
@@ -105,9 +105,9 @@ def mock_bridges():
             },
         }
     )
-    bridges["ai-mcp-salesforce"] = salesforce_mcp
+    bridges["salesforce-mcp"] = salesforce_mcp
 
-    # ai-mcp-payments: Payment and transaction tools
+    # payments-mcp: Payment and transaction tools
     payments_mcp = MagicMock()
     payments_mcp.is_connected = True
     payments_mcp.get_langchain_tools = AsyncMock(
@@ -136,9 +136,9 @@ def mock_bridges():
             "pending_transactions": 3,
         }
     )
-    bridges["ai-mcp-payments"] = payments_mcp
+    bridges["payments-mcp"] = payments_mcp
 
-    # ai-mcp-news-search: News and external data
+    # news-search-mcp: News and external data
     news_mcp = MagicMock()
     news_mcp.is_connected = True
     news_mcp.get_langchain_tools = AsyncMock(
@@ -172,7 +172,7 @@ def mock_bridges():
             "article_count": 2,
         }
     )
-    bridges["ai-mcp-news-search"] = news_mcp
+    bridges["news-search-mcp"] = news_mcp
 
     return bridges
 
