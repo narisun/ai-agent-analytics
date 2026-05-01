@@ -30,16 +30,16 @@ def _bridge(*, connected: bool, tools: list | None = None) -> MagicMock:
 
 async def test_returns_empty_list_when_all_bridges_disconnected():
     bridges = {
-        "data-mcp": _bridge(connected=False),
-        "salesforce-mcp": _bridge(connected=False),
+        "ai-mcp-data": _bridge(connected=False),
+        "ai-mcp-salesforce": _bridge(connected=False),
     }
     provider = _MCPBridgeToolsProvider(bridges)
 
     tools = await provider.get_langchain_tools(user_ctx=None)
     assert tools == []
     # Disconnected bridges' get_langchain_tools must NOT be called.
-    bridges["data-mcp"].get_langchain_tools.assert_not_called()
-    bridges["salesforce-mcp"].get_langchain_tools.assert_not_called()
+    bridges["ai-mcp-data"].get_langchain_tools.assert_not_called()
+    bridges["ai-mcp-salesforce"].get_langchain_tools.assert_not_called()
 
 
 async def test_returns_only_reachable_bridges_tools():
@@ -60,8 +60,8 @@ async def test_returns_only_reachable_bridges_tools():
 async def test_aggregates_tools_across_multiple_connected_bridges():
     t1, t2, t3 = MagicMock(), MagicMock(), MagicMock()
     bridges = {
-        "data-mcp": _bridge(connected=True, tools=[t1]),
-        "salesforce-mcp": _bridge(connected=True, tools=[t2, t3]),
+        "ai-mcp-data": _bridge(connected=True, tools=[t1]),
+        "ai-mcp-salesforce": _bridge(connected=True, tools=[t2, t3]),
     }
     provider = _MCPBridgeToolsProvider(bridges)
 
